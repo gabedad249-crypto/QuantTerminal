@@ -87,6 +87,8 @@ class MainWindow(QMainWindow):
         self.ai_box.setText("AI Engine\n\nWaiting for live candles...\n\nFVG confirmation strategy will plug in here.")
         self.thinking_box = QTextEdit(); self.thinking_box.setReadOnly(True)
         self.thinking_box.setText("Thinking Panel\n\nWaiting for candle context...")
+        self.coach_box = QTextEdit(); self.coach_box.setReadOnly(True)
+        self.coach_box.setText("Logic Coach\n\nWaiting for first evaluated setup...")
         self.stats_label = QLabel()
         self.open_trade_label = QLabel("No open paper trade")
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True)
@@ -172,7 +174,7 @@ class MainWindow(QMainWindow):
         mid = QSplitter(Qt.Horizontal)
         mid.setChildrenCollapsible(False)
         left = self._panel("Watchlist"); left.setMinimumWidth(140); left.setMaximumWidth(360)
-        self.watchlist = QListWidget(); self.watchlist.addItems(["Paper Trading", "Journal", "Signals", "Timeline", "Learning", "Memory", "Backtests", "Kalshi", "Logs", "Settings"])
+        self.watchlist = QListWidget(); self.watchlist.addItems(["Paper Trading", "Journal", "Signals", "Timeline", "Coach", "Learning", "Memory", "Backtests", "Kalshi", "Logs", "Settings"])
         self.watchlist.itemClicked.connect(self.on_watchlist_clicked)
         left.layout().addWidget(self.watchlist); mid.addWidget(left)
 
@@ -189,7 +191,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.5.1: paper training mode • auto UP/DOWN • resizable layout"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.6.0: logic engine • state machine • confidence breakdown • setup clusters"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -199,6 +201,7 @@ class MainWindow(QMainWindow):
         decision_tabs = QTabWidget()
         decision_tabs.addTab(self.ai_box, "Decision")
         decision_tabs.addTab(self.thinking_box, "Thinking Checklist")
+        decision_tabs.addTab(self.coach_box, "Logic Coach")
         right.layout().addWidget(decision_tabs)
 
         planner = QFrame(); planner.setObjectName("Panel")
@@ -256,6 +259,9 @@ class MainWindow(QMainWindow):
         timeline_tab = QWidget(); timeline_l = QVBoxLayout(timeline_tab)
         timeline_l.addWidget(QLabel("Signal Timeline — step-by-step reasoning trail for each setup"))
         timeline_l.addWidget(self.timeline_box)
+        coach_tab = QWidget(); coach_l = QVBoxLayout(coach_tab)
+        coach_l.addWidget(QLabel("Logic Coach — confidence breakdown, safety rules, and setup state"))
+        coach_l.addWidget(self.coach_box)
         kalshi_tab = QWidget(); kalshi_l = QVBoxLayout(kalshi_tab)
         apply_kalshi = QPushButton("Sync this Kalshi URL")
         apply_kalshi.clicked.connect(self.apply_kalshi_url)
@@ -267,6 +273,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(audit_tab, "Paper Journal / Audit")
         tabs.addTab(signal_tab, "Signal Journal")
         tabs.addTab(timeline_tab, "Signal Timeline")
+        tabs.addTab(coach_tab, "Logic Coach")
         tabs.addTab(learning_tab, "Learning")
         tabs.addTab(memory_tab, "Memory Stats")
         tabs.addTab(backtest_tab, "Backtest / Replay")
@@ -360,12 +367,13 @@ class MainWindow(QMainWindow):
             "Journal": 1,
             "Signals": 2,
             "Timeline": 3,
-            "Learning": 4,
-            "Memory": 5,
-            "Backtests": 6,
-            "Kalshi": 7,
-            "Logs": 8,
-            "Settings": 7,
+            "Coach": 4,
+            "Learning": 5,
+            "Memory": 6,
+            "Backtests": 7,
+            "Kalshi": 8,
+            "Logs": 9,
+            "Settings": 8,
         }
         if hasattr(self, "tabs") and name in mapping:
             self.tabs.setCurrentIndex(mapping[name])
@@ -396,6 +404,7 @@ class MainWindow(QMainWindow):
         if plan:
             plan_sig = f"{plan.side}:{plan.entry:.2f}:{plan.stop:.2f}:{plan.target:.2f}"
         return "|".join([
+            str(getattr(d, "state", "UNKNOWN")),
             str(getattr(d, "ready", False)),
             str(getattr(d, "side", "WAIT")),
             str(getattr(d, "grade", "")),
@@ -444,28 +453,35 @@ class MainWindow(QMainWindow):
                 f"Reason {d.plan.reason}"
             )
         else:
-            plan_note = "No buy-in yet. Waiting for full FVG + retrace + engulfing/rejection confirmation."
+            plan_note = "No buy-in yet. Waiting for the state machine to reach READY."
 
-        checklist = "\n".join(d.checklist[-8:]) if d.checklist else "Building candle context..."
-        reasons = "\n".join("• " + r for r in d.reasons[-6:]) if d.reasons else "• Monitoring"
+        checklist = "\n".join(d.checklist[-10:]) if d.checklist else "Building candle context..."
+        reasons = "\n".join("• " + r for r in d.reasons[-8:]) if d.reasons else "• Monitoring"
+        breakdown = "\n".join(getattr(d, "confidence_breakdown", [])[-10:]) or "No score yet"
+        safety = "\n".join(getattr(d, "safety_checks", [])[-8:]) or "Safety checks pending"
         sim = self.learning.similarity(d)
         sim_text = f"{sim['matches']} matches | {sim['win_rate']:.1f}% WR | avg ${sim['avg_pnl']:.2f} | score {sim['score']}/100 | {sim['label']}"
 
         ai_text = (
-            f"FVG Confirmation Engine\n\n"
+            f"FVG Logic Engine v0.6.0\n\n"
+            f"State\n{getattr(d, 'state', 'UNKNOWN')}\n\n"
             f"Decision\n{('READY ' + d.side) if d.ready else 'WAIT'}\n\n"
             f"Grade / Confidence\n{d.grade} / {d.confidence}%\n\n"
+            f"Confidence Breakdown\n{breakdown}\n\n"
             f"15m Trend\n{d.trend_15m}\n\n"
             f"5m Trend\n{d.trend_5m}\n\n"
-            f"FVG Count\n{d.fvg_count}\n\n"
-            f"Latest FVG\n{d.latest_fvg}\n\n"
+            f"Session\n{getattr(d, 'session_label', 'Unknown')}\n\n"
+            f"Focused GAP\n{d.latest_fvg}\n\n"
+            f"Similarity Memory\n{sim_text}\n\n"
             f"Checklist\n{checklist}\n\n"
+            f"Safety Rules\n{safety}\n\n"
             f"Auto Plan\n{plan_note}\n\n"
-            f"Why Waiting\n{reasons}\n\n"
-            f"Rule\nNo auto plan unless: trend + impulse + FVG + pullback + engulfing/rejection + RR >= 2."
+            f"Why Waiting / Why Ready\n{reasons}\n\n"
+            f"Hard Rule\nNo buy-in unless the state machine reaches READY: trend + impulse + GAP + pullback + confirmation + RR + safety."
         )
         self._set_text_stable(self.ai_box, ai_text, "_last_ai_text")
         self.update_thinking_panel(d)
+        self.update_coach_panel(d)
 
     def update_thinking_panel(self, d) -> None:
         snap = self.kalshi_timer.snapshot()
@@ -477,6 +493,8 @@ class MainWindow(QMainWindow):
 
         checklist = d.checklist or ["❌ Still building candle context"]
         reasons = d.reasons or ["Monitoring live BTC candles"]
+        breakdown = getattr(d, "confidence_breakdown", []) or ["No score yet"]
+        safety = getattr(d, "safety_checks", []) or ["Safety checks pending"]
         sim = self.learning.similarity(d)
         plan = "No buy-in yet"
         if d.ready and d.plan:
@@ -488,20 +506,77 @@ class MainWindow(QMainWindow):
                 f"RR:     {d.plan.rr:.2f}:1"
             )
         text = (
-            "FVG Method Thinking\n\n"
+            "FVG Method State Machine\n\n"
             f"{timer_line}\n\n"
+            f"Current State: {getattr(d, 'state', 'UNKNOWN')}\n"
+            f"Setup Signature: {getattr(d, 'setup_signature', '') or 'None yet'}\n\n"
             "Question Process\n"
             "1. Do we have enough 1m candles?\n"
             "2. Are 15m and 5m trend aligned?\n"
             "3. Did impulse create a clean FVG/GAP?\n"
             "4. Did price pull back into the GAP?\n"
             "5. Did engulfing/rejection confirm?\n"
-            "6. Is RR >= minimum?\n\n"
-            "Live Checklist\n" + "\n".join(checklist[-10:]) + "\n\n"
+            "6. Is RR >= minimum?\n"
+            "7. Do safety rules allow a trade?\n\n"
+            "Live Checklist\n" + "\n".join(checklist[-12:]) + "\n\n"
+            "Confidence Breakdown\n" + "\n".join(breakdown[-12:]) + "\n\n"
+            "Safety\n" + "\n".join(safety[-10:]) + "\n\n"
+            "Memory\n"
+            f"{sim['matches']} similar | WR {sim['win_rate']:.1f}% | score {sim['score']}/100 | {sim['label']}\n\n"
             "Why waiting / why ready\n" + "\n".join("• " + r for r in reasons[-8:]) + "\n\n"
             "Trade Plan\n" + plan
         )
         self._set_text_stable(self.thinking_box, text, "_last_thinking_text")
+
+    def update_coach_panel(self, d) -> None:
+        if not hasattr(self, "coach_box"):
+            return
+        sim = self.learning.similarity(d) if d else {"matches": 0, "win_rate": 0, "avg_pnl": 0, "score": 0, "label": "No setup"}
+        clusters = self.learning.clusters(limit=6) if hasattr(self.learning, "clusters") else []
+        cluster_text = "\n".join(
+            f"• {c['cluster']} | {c['trades']} trades | WR {c['win_rate']:.1f}% | avg ${c['avg_pnl']:.2f}"
+            for c in clusters
+        ) or "No clusters yet. Run Paper Training to build them."
+        text = (
+            "Logic Coach\n\n"
+            "This is the part that makes the bot a chart reader, not a random signal spammer.\n\n"
+            f"State: {getattr(d, 'state', 'UNKNOWN')}\n"
+            f"Direction: {getattr(d, 'side', 'WAIT')}\n"
+            f"Grade: {getattr(d, 'grade', 'WAIT')}\n"
+            f"Confidence: {getattr(d, 'confidence', 0)}%\n"
+            f"Session: {getattr(d, 'session_label', 'Unknown')}\n"
+            f"Focused GAP: {getattr(d, 'latest_fvg', 'None')}\n\n"
+            "What must happen next\n"
+        )
+        state = getattr(d, 'state', 'UNKNOWN')
+        if state == "BUILDING_CONTEXT":
+            text += "Load more candles so the bot can compare current action to recent context.\n"
+        elif state == "WAIT_TREND":
+            text += "Wait for 15m/5m bias to stop fighting each other.\n"
+        elif state == "WAIT_FVG":
+            text += "Wait for a fresh aligned fair value gap created by displacement.\n"
+        elif state == "WAIT_PULLBACK":
+            text += "Wait for price to return into the focused GAP. No chasing.\n"
+        elif state == "WAIT_CONFIRMATION":
+            text += "Wait for engulfing or rejection confirmation after the pullback.\n"
+        elif state == "WAIT_RR":
+            text += "Skip until stop/target gives acceptable reward-to-risk.\n"
+        elif state == "READY":
+            text += "Setup is valid. Paper Training may open automatically; Recommend Only will alert only.\n"
+        else:
+            text += "Monitoring.\n"
+        text += (
+            "\nMemory Similarity\n"
+            f"Matches: {sim['matches']} | Similar WR: {sim['win_rate']:.1f}% | Avg P/L: ${sim['avg_pnl']:.2f} | Score: {sim['score']}/100 | {sim['label']}\n\n"
+            "Best Learned Clusters\n" + cluster_text + "\n\n"
+            "Safety Guardrails\n"
+            "• One open trade max.\n"
+            "• One plan per GAP.\n"
+            "• No buy-in until READY.\n"
+            "• BTC15 expiry closes paper trades.\n"
+            "• Auto-tune only changes thresholds after enough paper outcomes.\n"
+        )
+        self._set_text_stable(self.coach_box, text, "_last_coach_text")
 
     def clean_chart_view(self) -> None:
         self.chart.max_gap_boxes = 3
@@ -610,6 +685,8 @@ class MainWindow(QMainWindow):
         )
         self._set_text_stable(self.ai_box, text, "_last_ai_text")
         self._set_text_stable(self.thinking_box, text, "_last_thinking_text")
+        if hasattr(self, "coach_box"):
+            self._set_text_stable(self.coach_box, text + "\n\nState: ACTIVE_TRADE. Logic engine is paused until this trade closes.", "_last_coach_text")
 
     def auto_manage_signal_plan(self) -> None:
         """Create/clear the chart plan from the strategy only.
@@ -918,7 +995,7 @@ class MainWindow(QMainWindow):
             f"Session P/L: ${total_pnl:,.2f}\n"
             f"Best trade: ${best:,.2f}\n"
             f"Worst trade: ${worst:,.2f}\n\n"
-            "v0.5.0: one GAP at a time, similarity score, and conservative self auto-tune are active."
+            "v0.6.0: state machine, confidence breakdown, setup clusters, and conservative self auto-tune are active."
         )
         self._set_text_stable(self.memory_stats_box, text, "_last_memory_stats_text")
 

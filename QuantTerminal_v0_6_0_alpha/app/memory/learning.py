@@ -15,6 +15,9 @@ class LearningSnapshot:
     side: str
     confidence: int
     grade: str
+    state: str
+    setup_signature: str
+    session_label: str
     trend_15m: str
     trend_5m: str
     fvg_count: int
@@ -23,7 +26,11 @@ class LearningSnapshot:
 
 
 class LearningMemory:
-    """Local learning store + v0.3.9 similarity/auto-tune helper."""
+    """Local learning store + similarity/auto-tune helper.
+
+    v0.6.0 adds setup clustering, guardrailed auto-tune, and richer outcome
+    fingerprints so Recommend Only can learn from Paper Training without guessing.
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -38,7 +45,11 @@ class LearningMemory:
         if not self.enabled or decision is None:
             return False
         now = time.time()
-        signature = f"{getattr(decision,'ready',False)}|{getattr(decision,'side','WAIT')}|{getattr(decision,'confidence',0)}|{getattr(decision,'latest_fvg','None')}|{getattr(decision,'trend_15m','')}|{getattr(decision,'trend_5m','')}"
+        signature = (
+            f"{getattr(decision,'state','')}|{getattr(decision,'ready',False)}|{getattr(decision,'side','WAIT')}|"
+            f"{getattr(decision,'confidence',0)}|{getattr(decision,'latest_fvg','None')}|"
+            f"{getattr(decision,'trend_15m','')}|{getattr(decision,'trend_5m','')}|{getattr(decision,'setup_signature','')}"
+        )
         if signature == self._last_signature and now - self._last_snapshot_time < throttle_seconds:
             return False
         self._last_signature = signature
@@ -50,6 +61,9 @@ class LearningMemory:
             side=str(getattr(decision, "side", "WAIT")),
             confidence=int(getattr(decision, "confidence", 0)),
             grade=str(getattr(decision, "grade", "WAIT")),
+            state=str(getattr(decision, "state", "UNKNOWN")),
+            setup_signature=str(getattr(decision, "setup_signature", "")),
+            session_label=str(getattr(decision, "session_label", "Unknown")),
             trend_15m=str(getattr(decision, "trend_15m", "Building")),
             trend_5m=str(getattr(decision, "trend_5m", "Building")),
             fvg_count=int(getattr(decision, "fvg_count", 0)),
@@ -75,6 +89,9 @@ class LearningMemory:
             "reason": getattr(trade, "reason", ""),
             "exit_reason": getattr(trade, "exit_reason", ""),
             "rr": getattr(trade, "rr", 0.0),
+            "size_usd": getattr(trade, "size_usd", 0.0),
+            "duration_sec": (float(getattr(trade, "closed_at", 0) or 0) - float(getattr(trade, "opened_at", 0) or 0)) if getattr(trade, "closed_at", None) else 0,
+            "cluster": self._cluster_from_trade(trade),
         }
         with self.outcomes_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
@@ -95,64 +112,106 @@ class LearningMemory:
         }
 
     def similarity(self, decision: Any) -> dict[str, Any]:
-        """Score current setup against learned paper outcomes.
-
-        v0.3.9 is intentionally conservative: it mostly compares side + FVG family
-        because older trades did not store every feature yet. Future builds will
-        add richer candle fingerprints.
-        """
         outcomes = self._read_jsonl(self.outcomes_path)
         if not decision or not outcomes:
             return {"matches": 0, "win_rate": 0.0, "avg_pnl": 0.0, "score": 0, "label": "No memory yet"}
         side = str(getattr(decision, "side", "WAIT"))
+        signature = str(getattr(decision, "setup_signature", ""))
         latest = str(getattr(decision, "latest_fvg", "")).upper()
+        trend_15m = str(getattr(decision, "trend_15m", ""))
+        trend_5m = str(getattr(decision, "trend_5m", ""))
+        session = str(getattr(decision, "session_label", ""))
         matched = []
         for row in outcomes:
             r_side = str(row.get("side", ""))
             reason = str(row.get("reason", "")).upper()
+            cluster = str(row.get("cluster", ""))
             score = 0
             if r_side == side:
+                score += 3
+            if signature and any(part and part in cluster for part in signature.split("|")[:4]):
                 score += 2
+            if trend_15m and trend_15m.upper() in reason:
+                score += 1
+            if trend_5m and trend_5m.upper() in reason:
+                score += 1
+            if session and session.upper() in cluster.upper():
+                score += 1
             if "FVG" in reason or "FVG" in latest:
                 score += 1
-            if score >= 2:
+            if score >= 4:
                 matched.append(row)
         if not matched:
             return {"matches": 0, "win_rate": 0.0, "avg_pnl": 0.0, "score": 0, "label": "No similar trades yet"}
         wins = [x for x in matched if float(x.get("pnl") or 0) > 0]
         avg = sum(float(x.get("pnl") or 0) for x in matched) / len(matched)
         wr = len(wins) / len(matched) * 100
-        # Confidence-style memory score, capped until sample is larger.
-        sample_cap = min(1.0, len(matched) / 30.0)
+        sample_cap = min(1.0, len(matched) / 50.0)
         edge = max(0.0, min(100.0, wr + avg * 2.0))
         mem_score = int(edge * sample_cap)
-        label = "Strong memory" if len(matched) >= 30 and wr >= 60 else ("Weak sample" if len(matched) < 30 else "Mixed memory")
+        label = "Strong memory" if len(matched) >= 50 and wr >= 60 else ("Weak sample" if len(matched) < 50 else "Mixed memory")
         return {"matches": len(matched), "win_rate": wr, "avg_pnl": avg, "score": mem_score, "label": label}
+
+    def clusters(self, limit: int = 8) -> list[dict[str, Any]]:
+        outcomes = self._read_jsonl(self.outcomes_path)
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in outcomes:
+            grouped.setdefault(str(row.get("cluster") or "Unknown"), []).append(row)
+        rows = []
+        for cluster, trades in grouped.items():
+            wins = [x for x in trades if float(x.get("pnl") or 0) > 0]
+            avg = sum(float(x.get("pnl") or 0) for x in trades) / len(trades)
+            rows.append({
+                "cluster": cluster,
+                "trades": len(trades),
+                "win_rate": len(wins) / len(trades) * 100 if trades else 0,
+                "avg_pnl": avg,
+            })
+        rows.sort(key=lambda x: (x["trades"], x["win_rate"], x["avg_pnl"]), reverse=True)
+        return rows[:limit]
+
+    def session_summary(self) -> str:
+        outcomes = self._read_jsonl(self.outcomes_path)
+        if not outcomes:
+            return "No learned outcomes yet. Paper Training mode will build session stats."
+        by_hour: dict[str, list[dict[str, Any]]] = {}
+        for row in outcomes:
+            hour = time.strftime("%H:00 UTC", time.gmtime(float(row.get("ts") or 0)))
+            by_hour.setdefault(hour, []).append(row)
+        lines = ["Learned session/hour stats"]
+        for hour, trades in sorted(by_hour.items())[-12:]:
+            wins = [x for x in trades if float(x.get("pnl") or 0) > 0]
+            avg = sum(float(x.get("pnl") or 0) for x in trades) / len(trades)
+            lines.append(f"{hour}: {len(trades)} trades | WR {len(wins)/len(trades)*100:.1f}% | avg ${avg:.2f}")
+        return "\n".join(lines)
 
     def auto_tune(self, current_min_rr: float) -> dict[str, Any]:
         outcomes = self._read_jsonl(self.outcomes_path)
-        if len(outcomes) < 20:
+        if len(outcomes) < 50:
             return {
                 "ready": False,
                 "recommended_min_rr": current_min_rr,
-                "reason": f"Need 20+ closed paper trades before tuning. Have {len(outcomes)}.",
+                "reason": f"Need 50+ closed paper trades before tuning. Have {len(outcomes)}.",
             }
-        wins = [x for x in outcomes if float(x.get("pnl") or 0) > 0]
-        win_rate = len(wins) / len(outcomes) * 100
-        avg = sum(float(x.get("pnl") or 0) for x in outcomes) / len(outcomes)
-        new_rr = float(current_min_rr)
-        reason = "No change."
+        recent = outcomes[-100:]
+        wins = [x for x in recent if float(x.get("pnl") or 0) > 0]
+        win_rate = len(wins) / len(recent) * 100
+        avg = sum(float(x.get("pnl") or 0) for x in recent) / len(recent)
+        old_rr = float(current_min_rr)
+        new_rr = old_rr
+        reason = "No change. Guardrails say current RR is acceptable."
+        # Guardrail: tiny steps only, no wild strategy changes.
         if win_rate < 45 or avg < 0:
-            new_rr = min(3.5, current_min_rr + 0.25)
-            reason = "Performance weak: raising RR filter so only cleaner setups qualify."
+            new_rr = min(3.5, old_rr + 0.10)
+            reason = "Recent performance weak: raising RR filter slightly so only cleaner setups qualify."
         elif win_rate > 62 and avg > 0.5:
-            new_rr = max(1.75, current_min_rr - 0.10)
-            reason = "Performance strong: slightly relaxing RR to capture more good setups."
+            new_rr = max(1.75, old_rr - 0.05)
+            reason = "Recent performance strong: relaxing RR slightly to capture more valid setups."
         return {
             "ready": True,
             "recommended_min_rr": round(new_rr, 2),
             "reason": reason,
-            "sample": len(outcomes),
+            "sample": len(recent),
             "win_rate": win_rate,
             "avg_pnl": avg,
         }
@@ -161,6 +220,11 @@ class LearningMemory:
         s = self.stats()
         sim = self.similarity(decision) if decision is not None else {"matches":0,"win_rate":0,"avg_pnl":0,"score":0,"label":"No active setup"}
         state = "ON" if s["enabled"] else "OFF"
+        clusters = self.clusters(limit=5)
+        cluster_text = "\n".join(
+            f"• {c['cluster']} | {c['trades']} trades | WR {c['win_rate']:.1f}% | avg ${c['avg_pnl']:.2f}"
+            for c in clusters
+        ) or "No setup clusters yet."
         return (
             f"Learning Mode: {state}\n"
             f"Setup snapshots: {s['snapshots']}\n"
@@ -173,8 +237,18 @@ class LearningMemory:
             f"Similar win rate: {sim['win_rate']:.1f}%\n"
             f"Similar avg P/L: ${sim['avg_pnl']:.2f}\n"
             f"Memory score: {sim['score']}/100\n"
-            f"Label: {sim['label']}\n"
+            f"Label: {sim['label']}\n\n"
+            "Setup Clusters\n" + cluster_text + "\n\n" + self.session_summary()
         )
+
+    def _cluster_from_trade(self, trade: Any) -> str:
+        side = str(getattr(trade, "side", "")) or "UNKNOWN"
+        reason = str(getattr(trade, "reason", ""))
+        # Reason is usually: FVG setup | trend15/trend5 | fvg | confidence ...
+        parts = [p.strip() for p in reason.split("|")]
+        trend = parts[1] if len(parts) > 1 else "trend?"
+        fvg = parts[2] if len(parts) > 2 else "FVG"
+        return f"{side} | {trend} | {fvg}"
 
     def _count_lines(self, path: Path) -> int:
         if not path.exists():
