@@ -19,6 +19,7 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
 from app.data.coinbase import CoinbaseFeed
 from app.data.candles import CandleBuilder, seconds_until_next_15m
 from app.paper.account import PaperAccount
+from app.strategy.setup_engine import FVGSetupEngine
 from app.version import APP_NAME, VERSION
 
 
@@ -37,11 +38,13 @@ class MainWindow(QMainWindow):
         self.latest_price: float | None = None
         self._syncing_plan = False
         self._last_ai_text = ""
+        self.last_decision = None
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
         self.candles = CandleBuilder(60)
         self.account = PaperAccount(settings.get("starting_balance", 100000.0))
+        self.setup_engine = FVGSetupEngine(min_rr=float(settings.get("minimum_rr", 2.0)))
         self.feed = CoinbaseFeed(lambda p: self.bus.price.emit(p), settings.get("symbol", "BTC-USD"))
 
         self.price_label = QLabel("Price: --")
@@ -57,6 +60,7 @@ class MainWindow(QMainWindow):
         self.stats_label = QLabel()
         self.open_trade_label = QLabel("No open paper trade")
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True)
+        self.trades_box = QTextEdit(); self.trades_box.setReadOnly(True)
 
         self.side_box = QComboBox(); self.side_box.addItems(["LONG", "SHORT"])
         self.size_box = NoWheelDoubleSpinBox(); self.size_box.setRange(10, 100000); self.size_box.setValue(1000); self.size_box.setPrefix("$")
@@ -70,6 +74,7 @@ class MainWindow(QMainWindow):
         self.plan_rr_label.setObjectName("Title")
 
         self._build_ui()
+        self.seed_historical_candles()
 
         self.side_box.currentTextChanged.connect(self.rebuild_plan_from_inputs)
         self.rr_box.valueChanged.connect(self.rebuild_plan_from_inputs)
@@ -127,7 +132,7 @@ class MainWindow(QMainWindow):
         zoom_in = QPushButton("+"); zoom_in.clicked.connect(self.chart.zoom_in)
         reset_view = QPushButton("Fit"); reset_view.clicked.connect(self.chart.reset_view)
         chart_tools.addWidget(QLabel("Zoom")); chart_tools.addWidget(zoom_out); chart_tools.addWidget(zoom_in); chart_tools.addWidget(reset_view)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.2.0: rewritten chart engine • wheel zoom • drag pan • cleaner overlays"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.0: real FVG checklist • buy-ins only after confirmation"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -158,12 +163,22 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
         paper = QWidget(); paper_l = QVBoxLayout(paper)
-        paper_l.addWidget(self.stats_label); paper_l.addWidget(self.open_trade_label); paper_l.addStretch()
+        paper_l.addWidget(self.stats_label); paper_l.addWidget(self.open_trade_label); paper_l.addWidget(self.trades_box); paper_l.addStretch()
         logs = QWidget(); logs_l = QVBoxLayout(logs); logs_l.addWidget(self.log_box)
         tabs.addTab(paper, "Paper Trading")
         tabs.addTab(logs, "Logs")
         root.addWidget(tabs, 0)
         self.setCentralWidget(central)
+
+    def seed_historical_candles(self) -> None:
+        try:
+            history = self.feed.fetch_historical_candles(granularity=60, limit=240)
+            if history:
+                self.candles.seed(history)
+                self.chart.set_candles(self.candles.candles)
+                self.log(f"Loaded {len(history)} Coinbase 1m historical candles for context")
+        except Exception as e:
+            self.log(f"Historical candle load failed: {e}")
 
     def queue_price(self, price: float) -> None:
         self.latest_price = price
@@ -178,6 +193,8 @@ class MainWindow(QMainWindow):
         candles = self.candles.update_price(price)
         self.account.update(price)
         self.chart.set_candles(candles)
+        self.last_decision = self.setup_engine.evaluate(candles)
+        self.apply_valid_setup_to_chart()
         self.update_ai(price)
         self.update_stats()
 
@@ -186,67 +203,68 @@ class MainWindow(QMainWindow):
         self.timer_label.setText(f"15m: {s//60:02d}:{s%60:02d}")
 
     def update_ai(self, price: float) -> None:
-        fvg_count = len(self.chart.fvgs)
-        last_fvg = self.chart.fvgs[-1].direction if self.chart.fvgs else "None"
         cs = self.candles.candles
-        trend = "Building..."
-        plan_note = "Waiting for candles"
-        if len(cs) >= 15:
-            trend = "Bullish" if cs[-1].close > cs[-15].close else "Bearish"
-        if cs:
-            p = self.chart.trade_plan
-            side = p.get("side", "LONG")
-            rr = p.get("rr", 0)
-            entry = p.get("entry")
-            if p.get("active") and isinstance(entry, (int, float)):
-                stop = p.get("stop")
-                target = p.get("target")
-                plan_note = f"{side} near {entry:,.2f} | Stop {float(stop):,.2f} | Target {float(target):,.2f} | RR {rr:.2f}:1"
-            else:
-                plan_note = "No active buy-in plan. Click Suggest Buy-In From Chart."
+        d = self.last_decision or self.setup_engine.evaluate(cs)
+        self.last_decision = d
+
+        if d.ready and d.plan:
+            plan_note = (
+                f"VALID {d.plan.side} SETUP\n"
+                f"Entry  {d.plan.entry:,.2f}\n"
+                f"Stop   {d.plan.stop:,.2f}\n"
+                f"Target {d.plan.target:,.2f}\n"
+                f"RR     {d.plan.rr:.2f}:1\n"
+                f"Reason {d.plan.reason}"
+            )
+        else:
+            plan_note = "No buy-in yet. Waiting for full FVG + retrace + engulfing/rejection confirmation."
+
+        checklist = "\n".join(d.checklist[-8:]) if d.checklist else "Building candle context..."
+        reasons = "\n".join("• " + r for r in d.reasons[-6:]) if d.reasons else "• Monitoring"
+
         ai_text = (
-            f"FVG Method Coach\n\n"
-            f"Market Bias\n{trend}\n\n"
-            f"Active FVGs\n{fvg_count}\n\n"
-            f"Latest FVG\n{last_fvg}\n\n"
-            f"Recommended Buy-In\n{plan_note}\n\n"
-            f"Long = buy/up. Short = sell/down.\n\n"
-            f"Next Build\nAuto FVG confirmation signals + real paper journal."
+            f"FVG Confirmation Engine\n\n"
+            f"Decision\n{('READY ' + d.side) if d.ready else 'WAIT'}\n\n"
+            f"Grade / Confidence\n{d.grade} / {d.confidence}%\n\n"
+            f"15m Trend\n{d.trend_15m}\n\n"
+            f"5m Trend\n{d.trend_5m}\n\n"
+            f"FVG Count\n{d.fvg_count}\n\n"
+            f"Latest FVG\n{d.latest_fvg}\n\n"
+            f"Checklist\n{checklist}\n\n"
+            f"Suggested Buy-In\n{plan_note}\n\n"
+            f"Why Waiting\n{reasons}\n\n"
+            f"Rule\nNo suggested trade unless: trend + impulse + FVG + pullback + engulfing/rejection + RR >= 2."
         )
-        # Prevent scroll snapping: only rewrite if the text actually changed.
         if ai_text != self._last_ai_text:
             self._last_ai_text = ai_text
             old = self.ai_box.verticalScrollBar().value()
             self.ai_box.setPlainText(ai_text)
             self.ai_box.verticalScrollBar().setValue(old)
 
-    def suggest_plan(self) -> None:
-        if not self.candles.candles:
-            self.log("No price yet")
+    def apply_valid_setup_to_chart(self) -> None:
+        d = self.last_decision
+        if not d or not d.ready or not d.plan:
             return
-        price = self.candles.candles[-1].close
-        candles = self.candles.candles
-        rr = self.rr_box.value()
-        # Auto side: use short-term trend. Green momentum = LONG, red momentum = SHORT.
-        if len(candles) >= 8:
-            side = "LONG" if candles[-1].close >= candles[-8].close else "SHORT"
-            self.side_box.setCurrentText(side)
-        else:
-            side = self.side_box.currentText()
-        recent = candles[-12:] if len(candles) >= 12 else candles
-        swing_low = min(c.low for c in recent)
-        swing_high = max(c.high for c in recent)
-        buffer = max(price * 0.00015, 3.0)
-        if side == "LONG":
-            stop = min(swing_low - buffer, price - buffer)
-            risk = max(price - stop, buffer)
-            target = price + risk * rr
-        else:
-            stop = max(swing_high + buffer, price + buffer)
-            risk = max(stop - price, buffer)
-            target = price - risk * rr
-        self.chart.set_plan(side, price, stop, target)
-        self.log(f"Suggested {side} plan: entry {price:,.2f}, stop {stop:,.2f}, target {target:,.2f}, RR {rr:.2f}:1")
+        # Do not overwrite an active manual plan unless the chart has no active plan.
+        if self.chart.trade_plan.get("active"):
+            return
+        self.chart.set_plan(d.plan.side, d.plan.entry, d.plan.stop, d.plan.target, active=True)
+        self.log(f"AI suggested {d.plan.side}: entry {d.plan.entry:,.2f}, stop {d.plan.stop:,.2f}, target {d.plan.target:,.2f}, RR {d.plan.rr:.2f}:1")
+
+    def suggest_plan(self) -> None:
+        self.last_decision = self.setup_engine.evaluate(self.candles.candles)
+        d = self.last_decision
+        if not d.ready or not d.plan:
+            self.chart.trade_plan["active"] = False
+            self.chart._redraw()
+            self.log("No buy-in: full FVG method not confirmed yet")
+            for reason in d.reasons[-4:]:
+                self.log("WAIT: " + reason)
+            self.update_ai(self.candles.candles[-1].close if self.candles.candles else 0)
+            return
+        self.side_box.setCurrentText(d.plan.side)
+        self.chart.set_plan(d.plan.side, d.plan.entry, d.plan.stop, d.plan.target)
+        self.log(f"Suggested {d.plan.side} FVG confirmation plan: entry {d.plan.entry:,.2f}, stop {d.plan.stop:,.2f}, target {d.plan.target:,.2f}, RR {d.plan.rr:.2f}:1")
 
     def on_chart_plan_changed(self, plan: dict) -> None:
         self._syncing_plan = True
@@ -283,6 +301,9 @@ class MainWindow(QMainWindow):
         if not plan.get("active") or not all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
             self.log("No active trade plan yet. Click Suggest Buy-In From Chart first.")
             return
+        if not self.last_decision or not self.last_decision.ready:
+            self.log("Blocked: paper trade requires valid FVG confirmation decision first.")
+            return
         try:
             self.account.open_position(
                 str(plan.get("side", "LONG")),
@@ -310,6 +331,15 @@ class MainWindow(QMainWindow):
             )
         else:
             self.open_trade_label.setText("No open paper trade")
+        closed = [x for x in self.account.trades if x.status == "CLOSED"][-8:]
+        if closed:
+            lines = ["Recent closed paper trades:"]
+            for tr in reversed(closed):
+                result = "WIN" if tr.pnl > 0 else "LOSS"
+                lines.append(f"{result} {tr.side} entry {tr.entry:,.2f} exit {float(tr.exit_price or 0):,.2f} P/L ${tr.pnl:,.2f}")
+            self.trades_box.setPlainText("\n".join(lines))
+        else:
+            self.trades_box.setPlainText("No closed paper trades yet. The account will update automatically after TP/SL is hit.")
 
     def log(self, message: str) -> None:
         self.logger.info(message)

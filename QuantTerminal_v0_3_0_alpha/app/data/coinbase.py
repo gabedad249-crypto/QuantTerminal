@@ -3,7 +3,10 @@ import random
 import threading
 import time
 from typing import Callable
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
+from urllib.parse import urlencode
+
+from app.strategy.fvg_engine import Candle
 
 try:
     import websocket  # type: ignore
@@ -17,6 +20,7 @@ class CoinbaseFeed:
         self._running = False
         self._thread: threading.Thread | None = None
         self.last_price: float | None = None
+        self.last_source = "INIT"
 
     def start(self) -> None:
         if self._running:
@@ -27,6 +31,36 @@ class CoinbaseFeed:
 
     def stop(self) -> None:
         self._running = False
+
+    def fetch_historical_candles(self, granularity: int = 60, limit: int = 240) -> list[Candle]:
+        """Fetch recent Coinbase candles. Coinbase returns newest-to-oldest arrays.
+        This gives the strategy enough lookback to actually think before suggesting a buy-in.
+        """
+        now = int(time.time())
+        start = now - granularity * limit
+        params = urlencode({"granularity": granularity, "start": start, "end": now})
+        url = f"https://api.exchange.coinbase.com/products/{self.symbol}/candles?{params}"
+        req = Request(url, headers={"User-Agent": "QuantTerminal/0.3"})
+        with urlopen(req, timeout=10) as r:
+            raw = json.loads(r.read().decode("utf-8"))
+        candles: list[Candle] = []
+        for row in raw:
+            # [time, low, high, open, close, volume]
+            ts, low, high, open_, close, vol = row
+            candles.append(Candle(float(ts), float(open_), float(high), float(low), float(close), float(vol)))
+        candles.sort(key=lambda c: c.ts)
+        if candles:
+            self.last_price = candles[-1].close
+        return candles[-limit:]
+
+    def start_price(self) -> float | None:
+        try:
+            with urlopen(f"https://api.exchange.coinbase.com/products/{self.symbol}/ticker", timeout=5) as r:
+                price = float(json.loads(r.read().decode("utf-8"))["price"])
+                self.last_price = price
+                return price
+        except Exception:
+            return self.last_price
 
     def _run(self) -> None:
         if websocket:
@@ -53,6 +87,7 @@ class CoinbaseFeed:
             if "price" in data:
                 price = float(data["price"])
                 self.last_price = price
+                self.last_source = "WS"
                 self.on_price(price)
 
         while self._running:
@@ -65,8 +100,11 @@ class CoinbaseFeed:
             try:
                 with urlopen(f"https://api.exchange.coinbase.com/products/{self.symbol}/ticker", timeout=5) as r:
                     price = float(json.loads(r.read().decode("utf-8"))["price"])
+                    self.last_source = "REST"
             except Exception:
+                # Last-resort fake tick only so UI stays alive offline. It is labeled as SIM.
                 price = (self.last_price or 100000.0) + random.uniform(-80, 80)
+                self.last_source = "SIM"
             self.last_price = price
             self.on_price(price)
             time.sleep(1)
