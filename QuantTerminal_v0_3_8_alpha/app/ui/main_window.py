@@ -61,7 +61,7 @@ class MainWindow(QMainWindow):
         self.setup_engine = FVGSetupEngine(min_rr=float(settings.get("minimum_rr", 2.0)))
         from pathlib import Path
         self.learning = LearningMemory(Path("memory"))
-        self.kalshi_timer = KalshiBTC15Timer(settings.get("kalshi_market_url", "https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/kxbtc15m-26jun280030"))
+        self.kalshi_timer = KalshiBTC15Timer(settings.get("kalshi_market_url", "https://kalshi.com/category/crypto/btc?frequency=fifteen_min"))
         self._last_kalshi_refresh = 0.0
         self.feed = CoinbaseFeed(lambda p: self.bus.price.emit(p), settings.get("symbol", "BTC-USD"))
 
@@ -85,12 +85,14 @@ class MainWindow(QMainWindow):
         self.learning_box = QTextEdit(); self.learning_box.setReadOnly(True)
         self.signal_box = QTextEdit(); self.signal_box.setReadOnly(True)
         self.kalshi_debug_box = QTextEdit(); self.kalshi_debug_box.setReadOnly(True)
+        self.backtest_box = QTextEdit(); self.backtest_box.setReadOnly(True)
+        self.memory_stats_box = QTextEdit(); self.memory_stats_box.setReadOnly(True)
         self.learning_toggle = QCheckBox("Learning Mode")
         self.learning_toggle.setChecked(True)
         self.learning_toggle.stateChanged.connect(self.on_learning_toggle)
         self.auto_paper_toggle = QCheckBox("Auto-open paper when ready")
         self.auto_paper_toggle.setChecked(False)
-        self.kalshi_url_box = QLineEdit(settings.get("kalshi_market_url", "https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/kxbtc15m-26jun280030"))
+        self.kalshi_url_box = QLineEdit(settings.get("kalshi_market_url", "https://kalshi.com/category/crypto/btc?frequency=fifteen_min"))
         self.kalshi_url_box.setPlaceholderText("Paste Kalshi BTC15 market URL")
 
         self.side_box = QComboBox(); self.side_box.addItems(["LONG", "SHORT"])
@@ -170,7 +172,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.7: exact URL timer • paper journal/audit • verified TP/SL outcomes"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.8: category BTC15 sync • backtest/replay • memory stats • exports"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -216,11 +218,22 @@ class MainWindow(QMainWindow):
         learning_tab = QWidget(); learning_l = QVBoxLayout(learning_tab)
         learning_l.addWidget(self.learning_toggle)
         learning_l.addWidget(self.learning_box)
+        memory_tab = QWidget(); memory_l = QVBoxLayout(memory_tab)
+        memory_l.addWidget(QLabel("Memory Stats — shows learned paper outcomes and current edge notes"))
+        memory_l.addWidget(self.memory_stats_box)
+        backtest_tab = QWidget(); backtest_l = QVBoxLayout(backtest_tab)
+        run_backtest = QPushButton("Run FVG Replay Backtest")
+        run_backtest.clicked.connect(self.run_replay_backtest)
+        export_btn = QPushButton("Export Paper Report")
+        export_btn.clicked.connect(self.export_paper_report)
+        backtest_l.addWidget(run_backtest)
+        backtest_l.addWidget(export_btn)
+        backtest_l.addWidget(self.backtest_box)
         signal_tab = QWidget(); signal_l = QVBoxLayout(signal_tab); signal_l.addWidget(self.signal_box)
         kalshi_tab = QWidget(); kalshi_l = QVBoxLayout(kalshi_tab)
         apply_kalshi = QPushButton("Sync this Kalshi URL")
         apply_kalshi.clicked.connect(self.apply_kalshi_url)
-        kalshi_l.addWidget(QLabel("Kalshi BTC15 market URL"))
+        kalshi_l.addWidget(QLabel("Kalshi BTC15 URL — category page is best for live sync"))
         kalshi_l.addWidget(self.kalshi_url_box)
         kalshi_l.addWidget(apply_kalshi)
         kalshi_l.addWidget(self.kalshi_debug_box)
@@ -228,6 +241,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(audit_tab, "Paper Journal / Audit")
         tabs.addTab(signal_tab, "Signal Journal")
         tabs.addTab(learning_tab, "Learning")
+        tabs.addTab(memory_tab, "Memory Stats")
+        tabs.addTab(backtest_tab, "Backtest / Replay")
         tabs.addTab(kalshi_tab, "Kalshi Debug")
         tabs.addTab(logs, "Logs")
         root.addWidget(tabs, 0)
@@ -284,7 +299,7 @@ class MainWindow(QMainWindow):
             self.kalshi_timer.refresh_async()
         snap = self.kalshi_timer.snapshot()
         s = snap.seconds_left()
-        src = "Kalshi" if snap.source in ("KALSHI", "URL_TICKER") else "Est"
+        src = "Kalshi" if snap.source in ("KALSHI", "KALSHI_ACTIVE", "URL_TICKER") else "Est"
         ticker = f" {snap.ticker}" if snap.ticker else ""
         self.timer_label.setText(f"BTC15 {src}: {s//60:02d}:{s%60:02d}{ticker}")
         self.update_kalshi_debug(snap)
@@ -526,6 +541,7 @@ class MainWindow(QMainWindow):
     def on_learning_toggle(self) -> None:
         self.learning.enabled = self.learning_toggle.isChecked()
         self.update_learning_panel()
+        self.update_memory_stats_panel()
         self.update_trade_button_state()
 
     def capture_closed_trades_for_learning(self) -> None:
@@ -572,6 +588,7 @@ class MainWindow(QMainWindow):
             self.trades_box.setPlainText("No closed paper trades yet. The account will update automatically after TP/SL is hit.")
         self.update_audit_panel()
         self.update_learning_panel()
+        self.update_memory_stats_panel()
         self.update_trade_button_state()
 
     def update_audit_panel(self) -> None:
@@ -603,6 +620,100 @@ class MainWindow(QMainWindow):
                 lines.append("   " + formula)
         self.audit_box.setPlainText("\n".join(lines))
 
+    def update_memory_stats_panel(self) -> None:
+        if not hasattr(self, "memory_stats_box"):
+            return
+        stats = self.learning.stats()
+        closed = [t for t in self.account.trades if t.status == "CLOSED"]
+        total_pnl = sum(t.pnl for t in closed)
+        best = max((t.pnl for t in closed), default=0.0)
+        worst = min((t.pnl for t in closed), default=0.0)
+        text = (
+            "Memory / Edge Stats\n\n"
+            f"Learning: {'ON' if stats.get('enabled') else 'OFF'}\n"
+            f"Setup snapshots saved: {stats.get('snapshots', 0)}\n"
+            f"Outcomes learned: {stats.get('outcomes', 0)}\n"
+            f"Learned win rate: {stats.get('win_rate', 0.0):.1f}%\n"
+            f"Learned avg P/L: ${stats.get('avg_pnl', 0.0):.2f}\n\n"
+            "Current session paper stats\n"
+            f"Closed trades: {len(closed)}\n"
+            f"Session P/L: ${total_pnl:,.2f}\n"
+            f"Best trade: ${best:,.2f}\n"
+            f"Worst trade: ${worst:,.2f}\n\n"
+            "Next: v0.4.x will use these records for similarity scoring before auto-paper opens."
+        )
+        self.memory_stats_box.setPlainText(text)
+
+    def run_replay_backtest(self) -> None:
+        candles = list(self.candles.candles)
+        if len(candles) < 90:
+            self.backtest_box.setPlainText("Need at least 90 one-minute candles before replay backtest can run.")
+            return
+        wins = losses = trades = 0
+        total_pnl = 0.0
+        lines = ["FVG Replay Backtest", "No future candles are shown to the engine during decisions.", ""]
+        # Lightweight replay: evaluate one candle at a time and simulate a single open trade.
+        open_trade = None
+        for i in range(60, len(candles)):
+            visible = candles[:i+1]
+            price = visible[-1].close
+            if open_trade:
+                side, entry, stop, target, size = open_trade
+                if side == "LONG":
+                    hit_stop = price <= stop; hit_target = price >= target
+                    pnl = (price - entry) / entry * size
+                else:
+                    hit_stop = price >= stop; hit_target = price <= target
+                    pnl = (entry - price) / entry * size
+                if hit_stop or hit_target:
+                    trades += 1
+                    total_pnl += pnl
+                    if hit_target or pnl > 0:
+                        wins += 1
+                    else:
+                        losses += 1
+                    lines.append(f"#{trades:03d} {'WIN' if (hit_target or pnl > 0) else 'LOSS'} {side} exit {price:,.2f} P/L ${pnl:.2f}")
+                    open_trade = None
+                continue
+            d = self.setup_engine.evaluate(visible)
+            if d.ready and d.plan:
+                open_trade = (d.plan.side, d.plan.entry, d.plan.stop, d.plan.target, 1000.0)
+        win_rate = (wins / trades * 100) if trades else 0.0
+        summary = [
+            f"Trades: {trades}",
+            f"Wins/Losses: {wins}/{losses}",
+            f"Win rate: {win_rate:.1f}%",
+            f"Paper P/L on $1,000 test size: ${total_pnl:,.2f}",
+            "",
+        ]
+        self.backtest_box.setPlainText("\n".join(summary + lines[-80:]))
+
+    def export_paper_report(self) -> None:
+        from pathlib import Path
+        from datetime import datetime
+        out_dir = Path("exports"); out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"paper_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        s = self.account.stats()
+        lines = [
+            "Quant Terminal Paper Report",
+            f"Generated: {datetime.now().isoformat(timespec='seconds')}",
+            "",
+            f"Cash: ${s['balance']:,.2f}",
+            f"Equity: ${s.get('equity', s['balance']):,.2f}",
+            f"Closed P/L: ${s['closed_pnl']:,.2f}",
+            f"Trades: {s['trades']}",
+            f"Win Rate: {s['win_rate']:.1f}%",
+            f"Profit Factor: {s['profit_factor']:.2f}",
+            "",
+            "Trades:",
+        ]
+        for tr in self.account.trades:
+            lines.append(tr.audit_line())
+        path.write_text("\n".join(lines), encoding="utf-8")
+        self.log(f"Exported paper report: {path}")
+        self.backtest_box.setPlainText(f"Exported report to:\n{path}")
+
+
     def log_signal(self, message: str) -> None:
         from datetime import datetime
         line = f"{datetime.now().strftime('%H:%M:%S')}  {message}"
@@ -626,11 +737,12 @@ class MainWindow(QMainWindow):
             f"Title: {snap.title or 'None'}\n"
             f"Close time: {close}\n"
             f"Time left: {snap.seconds_left()//60:02d}:{snap.seconds_left()%60:02d}\n"
+            f"Candidates found: {getattr(snap, 'candidate_count', 0)}\n"
             f"Updated: {updated}\n"
             f"Last error: {snap.last_error or 'None'}\n\n"
             "Timer sources:\n"
-            "• URL_TICKER = parsed from your pasted Kalshi market URL; this should match the exact page countdown.\n"
-            "• KALSHI = from public market close_time.\n"
+            "• KALSHI_ACTIVE = nearest open KXBTC15M from the category page style sync.\n"
+            "• URL_TICKER = exact pasted market URL, only used while still active.\n"
             "• ESTIMATED = quarter-hour fallback only."
         )
         self.kalshi_debug_box.setPlainText(text)
