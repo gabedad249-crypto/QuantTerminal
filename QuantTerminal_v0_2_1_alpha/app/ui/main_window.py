@@ -36,6 +36,7 @@ class MainWindow(QMainWindow):
 
         self.latest_price: float | None = None
         self._syncing_plan = False
+        self._last_ai_text = ""
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
@@ -177,8 +178,6 @@ class MainWindow(QMainWindow):
         candles = self.candles.update_price(price)
         self.account.update(price)
         self.chart.set_candles(candles)
-        if self.entry_price_box.value() <= 1 and candles:
-            self.suggest_plan()
         self.update_ai(price)
         self.update_stats()
 
@@ -199,25 +198,55 @@ class MainWindow(QMainWindow):
             side = p.get("side", "LONG")
             rr = p.get("rr", 0)
             entry = p.get("entry")
-            plan_note = f"Suggested {side} buy-in near {entry:,.2f} | RR {rr:.2f}:1" if isinstance(entry, (int, float)) else "No plan yet"
-        self.ai_box.setText(
+            if p.get("active") and isinstance(entry, (int, float)):
+                stop = p.get("stop")
+                target = p.get("target")
+                plan_note = f"{side} near {entry:,.2f} | Stop {float(stop):,.2f} | Target {float(target):,.2f} | RR {rr:.2f}:1"
+            else:
+                plan_note = "No active buy-in plan. Click Suggest Buy-In From Chart."
+        ai_text = (
             f"FVG Method Coach\n\n"
             f"Market Bias\n{trend}\n\n"
             f"Active FVGs\n{fvg_count}\n\n"
             f"Latest FVG\n{last_fvg}\n\n"
-            f"Buy-In Plan\n{plan_note}\n\n"
-            f"How to use\nDrag ENTRY / STOP / TARGET lines on chart, then click Open Planned Paper Trade.\n\n"
-            f"Next Feature\nReal chart engine + auto FVG confirmation entries"
+            f"Recommended Buy-In\n{plan_note}\n\n"
+            f"Long = buy/up. Short = sell/down.\n\n"
+            f"Next Build\nAuto FVG confirmation signals + real paper journal."
         )
+        # Prevent scroll snapping: only rewrite if the text actually changed.
+        if ai_text != self._last_ai_text:
+            self._last_ai_text = ai_text
+            old = self.ai_box.verticalScrollBar().value()
+            self.ai_box.setPlainText(ai_text)
+            self.ai_box.verticalScrollBar().setValue(old)
 
     def suggest_plan(self) -> None:
         if not self.candles.candles:
             self.log("No price yet")
             return
         price = self.candles.candles[-1].close
-        side = self.side_box.currentText()
+        candles = self.candles.candles
         rr = self.rr_box.value()
-        self.chart.create_default_plan(price, side=side, rr=rr)
+        # Auto side: use short-term trend. Green momentum = LONG, red momentum = SHORT.
+        if len(candles) >= 8:
+            side = "LONG" if candles[-1].close >= candles[-8].close else "SHORT"
+            self.side_box.setCurrentText(side)
+        else:
+            side = self.side_box.currentText()
+        recent = candles[-12:] if len(candles) >= 12 else candles
+        swing_low = min(c.low for c in recent)
+        swing_high = max(c.high for c in recent)
+        buffer = max(price * 0.00015, 3.0)
+        if side == "LONG":
+            stop = min(swing_low - buffer, price - buffer)
+            risk = max(price - stop, buffer)
+            target = price + risk * rr
+        else:
+            stop = max(swing_high + buffer, price + buffer)
+            risk = max(stop - price, buffer)
+            target = price - risk * rr
+        self.chart.set_plan(side, price, stop, target)
+        self.log(f"Suggested {side} plan: entry {price:,.2f}, stop {stop:,.2f}, target {target:,.2f}, RR {rr:.2f}:1")
 
     def on_chart_plan_changed(self, plan: dict) -> None:
         self._syncing_plan = True
@@ -240,19 +269,19 @@ class MainWindow(QMainWindow):
         stop = self.stop_price_box.value()
         target = self.target_price_box.value()
         if entry > 1 and stop > 1 and target > 1:
-            self.chart.set_plan(self.side_box.currentText(), entry, stop, target)
+            self.chart.set_plan(self.side_box.currentText(), entry, stop, target, active=True)
 
     def rebuild_plan_from_inputs(self) -> None:
         if self._syncing_plan:
             return
-        if self.candles.candles:
+        if self.candles.candles and self.chart.trade_plan.get("active"):
             self.chart.create_default_plan(self.entry_price_box.value() if self.entry_price_box.value() > 1 else self.candles.candles[-1].close,
                                            side=self.side_box.currentText(), rr=self.rr_box.value())
 
     def open_planned_trade(self) -> None:
         plan = self.chart.trade_plan
-        if not all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
-            self.log("No complete trade plan yet")
+        if not plan.get("active") or not all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
+            self.log("No active trade plan yet. Click Suggest Buy-In From Chart first.")
             return
         try:
             self.account.open_position(

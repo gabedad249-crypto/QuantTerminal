@@ -50,6 +50,7 @@ class ChartWidget(QGraphicsView):
             "stop": None,
             "target": None,
             "rr": 2.0,
+            "active": False,
         }
 
         self._plot = QRectF(60, 12, 900, 360)
@@ -60,8 +61,6 @@ class ChartWidget(QGraphicsView):
     def set_candles(self, candles: list[Candle]) -> None:
         self.candles = candles[-800:]
         self.fvgs = self.engine.detect(self.candles)
-        if self.candles and self.trade_plan["entry"] is None:
-            self.create_default_plan(self.candles[-1].close, emit=False)
         self._redraw()
 
     def create_default_plan(self, price: float, side: str | None = None, rr: float | None = None, emit: bool = True) -> None:
@@ -74,15 +73,16 @@ class ChartWidget(QGraphicsView):
         else:
             stop = price + risk
             target = price - risk * rr
-        self.set_plan(side, price, stop, target, emit=emit)
+        self.set_plan(side, price, stop, target, emit=emit, active=True)
 
-    def set_plan(self, side: str, entry: float, stop: float, target: float, emit: bool = True) -> None:
+    def set_plan(self, side: str, entry: float, stop: float, target: float, emit: bool = True, active: bool = True) -> None:
         self.trade_plan = {
             "side": side,
             "entry": float(entry),
             "stop": float(stop),
             "target": float(target),
             "rr": self._calc_rr(side, float(entry), float(stop), float(target)),
+            "active": active,
         }
         if emit:
             self.planChanged.emit(dict(self.trade_plan))
@@ -132,11 +132,12 @@ class ChartWidget(QGraphicsView):
     def _price_range(self, candles: list[Candle]) -> tuple[float, float]:
         hi = max(c.high for c in candles)
         lo = min(c.low for c in candles)
-        for key in ("entry", "stop", "target"):
-            val = self.trade_plan.get(key)
-            if isinstance(val, (int, float)):
-                hi = max(hi, float(val))
-                lo = min(lo, float(val))
+        if self.trade_plan.get("active"):
+            for key in ("entry", "stop", "target"):
+                val = self.trade_plan.get(key)
+                if isinstance(val, (int, float)):
+                    hi = max(hi, float(val))
+                    lo = min(lo, float(val))
         if hi == lo:
             hi += 1
             lo -= 1
@@ -202,8 +203,9 @@ class ChartWidget(QGraphicsView):
         self._draw_swings(candles)
         self._draw_trade_plan()
         self._draw_crosshair()
-        self.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
-        self.resetTransform()  # keep scene pixels 1:1; zoom is logical via visible_bars
+        # Do not call fitInView/resetTransform here. Zoom is handled by visible_bars;
+        # forcing the view every redraw made the chart feel like it snapped back.
+        self.setSceneRect(0, 0, w, h)
 
     def _draw_background(self, w: int, h: int) -> None:
         self.scene.addRect(0, 0, w, h, QPen(Qt.NoPen), QBrush(QColor("#0b0f14")))
@@ -282,7 +284,8 @@ class ChartWidget(QGraphicsView):
         entry = self.trade_plan.get("entry")
         stop = self.trade_plan.get("stop")
         target = self.trade_plan.get("target")
-        if not all(isinstance(v, (int, float)) for v in (entry, stop, target)):
+        if not self.trade_plan.get("active") or not all(isinstance(v, (int, float)) for v in (entry, stop, target)):
+            self._text(self._plot.left() + 10, self._plot.top() + 10, "No planned trade • click Suggest Buy-In", "#94a3b8", 10)
             return
         side = str(self.trade_plan.get("side", "LONG"))
         vals = [("target", float(target), "#2563eb", "TARGET"), ("entry", float(entry), "#e5e7eb", "ENTRY"), ("stop", float(stop), "#dc2626", "STOP")]
@@ -371,6 +374,7 @@ class ChartWidget(QGraphicsView):
                 self._redraw()
             event.accept()
             return
+        # Crosshair-only redraw is throttled by Qt; do not touch zoom/offset here.
         self._redraw()
         super().mouseMoveEvent(event)
 
