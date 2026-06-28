@@ -47,6 +47,9 @@ class MainWindow(QMainWindow):
         self._last_decision_signature = ""
         self.last_decision = None
         self._learned_closed_trade_ids = set()
+        self._last_auto_plan_sig = ""
+        self._last_ready_signal_sig = ""
+        self._journal_lines: list[str] = []
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
@@ -76,6 +79,8 @@ class MainWindow(QMainWindow):
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True)
         self.trades_box = QTextEdit(); self.trades_box.setReadOnly(True)
         self.learning_box = QTextEdit(); self.learning_box.setReadOnly(True)
+        self.signal_box = QTextEdit(); self.signal_box.setReadOnly(True)
+        self.kalshi_debug_box = QTextEdit(); self.kalshi_debug_box.setReadOnly(True)
         self.learning_toggle = QCheckBox("Learning Mode")
         self.learning_toggle.setChecked(True)
         self.learning_toggle.stateChanged.connect(self.on_learning_toggle)
@@ -157,7 +162,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.3: stable thinking panel • cleaner chart • better Kalshi matching"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.4: auto signal engine • no fake entry • journal + Kalshi debug"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -179,12 +184,12 @@ class MainWindow(QMainWindow):
         fl.addRow("Stop", self.stop_price_box)
         fl.addRow("Target", self.target_price_box)
         fl.addRow("Ratio", self.plan_rr_label)
-        use_ai_btn = QPushButton("Suggest Buy-In From Chart")
-        use_ai_btn.clicked.connect(self.suggest_plan)
-        open_btn = QPushButton("Open Planned Paper Trade")
+        open_btn = QPushButton("Open Auto Plan Paper Trade")
         open_btn.clicked.connect(self.open_planned_trade)
-        fl.addRow(use_ai_btn)
         fl.addRow(open_btn)
+        note = QLabel("Auto plan appears only after FVG + pullback + confirmation")
+        note.setObjectName("Muted")
+        fl.addRow(note)
         right.layout().addWidget(planner)
         mid.addWidget(right)
         root.addLayout(mid, 1)
@@ -196,8 +201,12 @@ class MainWindow(QMainWindow):
         learning_tab = QWidget(); learning_l = QVBoxLayout(learning_tab)
         learning_l.addWidget(self.learning_toggle)
         learning_l.addWidget(self.learning_box)
+        signal_tab = QWidget(); signal_l = QVBoxLayout(signal_tab); signal_l.addWidget(self.signal_box)
+        kalshi_tab = QWidget(); kalshi_l = QVBoxLayout(kalshi_tab); kalshi_l.addWidget(self.kalshi_debug_box)
         tabs.addTab(paper, "Paper Trading")
+        tabs.addTab(signal_tab, "Signal Journal")
         tabs.addTab(learning_tab, "Learning")
+        tabs.addTab(kalshi_tab, "Kalshi Debug")
         tabs.addTab(logs, "Logs")
         root.addWidget(tabs, 0)
         self.setCentralWidget(central)
@@ -235,7 +244,7 @@ class MainWindow(QMainWindow):
 
         self.last_decision = self.setup_engine.evaluate(candles)
         self.learning.record_snapshot(price, self.last_decision)
-        self.apply_valid_setup_to_chart()
+        self.auto_manage_signal_plan()
 
         sig = self._decision_signature(self.last_decision)
         if now - self._last_ai_update_ts >= 1.25 or sig != self._last_decision_signature:
@@ -255,6 +264,7 @@ class MainWindow(QMainWindow):
         src = "Kalshi" if snap.source == "KALSHI" else "Est"
         ticker = f" {snap.ticker}" if snap.ticker else ""
         self.timer_label.setText(f"BTC15 {src}: {s//60:02d}:{s%60:02d}{ticker}")
+        self.update_kalshi_debug(snap)
 
     def _decision_signature(self, d) -> str:
         if not d:
@@ -321,9 +331,9 @@ class MainWindow(QMainWindow):
             f"FVG Count\n{d.fvg_count}\n\n"
             f"Latest FVG\n{d.latest_fvg}\n\n"
             f"Checklist\n{checklist}\n\n"
-            f"Suggested Buy-In\n{plan_note}\n\n"
+            f"Auto Plan\n{plan_note}\n\n"
             f"Why Waiting\n{reasons}\n\n"
-            f"Rule\nNo suggested trade unless: trend + impulse + FVG + pullback + engulfing/rejection + RR >= 2."
+            f"Rule\nNo auto plan unless: trend + impulse + FVG + pullback + engulfing/rejection + RR >= 2."
         )
         self._set_text_stable(self.ai_box, ai_text, "_last_ai_text")
         self.update_thinking_panel(d)
@@ -341,7 +351,7 @@ class MainWindow(QMainWindow):
         plan = "No buy-in yet"
         if d.ready and d.plan:
             plan = (
-                f"{d.plan.side} PLAN READY\n"
+                f"{d.plan.side} AUTO PLAN READY\n"
                 f"Entry:  {d.plan.entry:,.2f}\n"
                 f"Stop:   {d.plan.stop:,.2f}\n"
                 f"Target: {d.plan.target:,.2f}\n"
@@ -381,30 +391,31 @@ class MainWindow(QMainWindow):
         self.chart._redraw()
         self.log(f"High/Low labels: {'ON' if self.chart.show_swing_labels else 'OFF'}")
 
-    def apply_valid_setup_to_chart(self) -> None:
+    def auto_manage_signal_plan(self) -> None:
+        """Create/clear the chart plan from the strategy only.
+
+        This prevents the app from showing fake ENTRY lines. If there is no
+        validated FVG confirmation setup and no open paper trade, the chart plan
+        is cleared. When the setup becomes valid, a BUY-IN/STOP/TARGET plan is
+        displayed automatically.
+        """
         d = self.last_decision
         if not d or not d.ready or not d.plan:
+            if not self.account.open_trade and self.chart.trade_plan.get("active"):
+                self.chart.clear_plan()
+                self._last_auto_plan_sig = ""
             return
-        # Do not overwrite an active manual plan unless the chart has no active plan.
-        if self.chart.trade_plan.get("active"):
-            return
-        self.chart.set_plan(d.plan.side, d.plan.entry, d.plan.stop, d.plan.target, active=True)
-        self.log(f"AI suggested {d.plan.side}: entry {d.plan.entry:,.2f}, stop {d.plan.stop:,.2f}, target {d.plan.target:,.2f}, RR {d.plan.rr:.2f}:1")
 
-    def suggest_plan(self) -> None:
-        self.last_decision = self.setup_engine.evaluate(self.candles.candles)
-        d = self.last_decision
-        if not d.ready or not d.plan:
-            self.chart.trade_plan["active"] = False
-            self.chart._redraw()
-            self.log("No buy-in: full FVG method not confirmed yet")
-            for reason in d.reasons[-4:]:
-                self.log("WAIT: " + reason)
-            self.update_ai(self.candles.candles[-1].close if self.candles.candles else 0)
+        sig = f"{d.plan.side}:{d.plan.entry:.2f}:{d.plan.stop:.2f}:{d.plan.target:.2f}"
+        if sig == self._last_auto_plan_sig:
             return
+        self._last_auto_plan_sig = sig
         self.side_box.setCurrentText(d.plan.side)
-        self.chart.set_plan(d.plan.side, d.plan.entry, d.plan.stop, d.plan.target)
-        self.log(f"Suggested {d.plan.side} FVG confirmation plan: entry {d.plan.entry:,.2f}, stop {d.plan.stop:,.2f}, target {d.plan.target:,.2f}, RR {d.plan.rr:.2f}:1")
+        self.chart.set_plan(d.plan.side, d.plan.entry, d.plan.stop, d.plan.target, active=True, mode="plan")
+        self.log_signal(
+            f"AUTO PLAN {d.plan.side} | buy-in {d.plan.entry:,.2f} | stop {d.plan.stop:,.2f} | "
+            f"target {d.plan.target:,.2f} | RR {d.plan.rr:.2f}:1 | confidence {d.confidence}% | grade {d.grade}"
+        )
 
     def on_chart_plan_changed(self, plan: dict) -> None:
         self._syncing_plan = True
@@ -439,7 +450,7 @@ class MainWindow(QMainWindow):
     def open_planned_trade(self) -> None:
         plan = self.chart.trade_plan
         if not plan.get("active") or not all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
-            self.log("No active trade plan yet. Click Suggest Buy-In From Chart first.")
+            self.log("No auto plan yet. Waiting for confirmed FVG setup first.")
             return
         if not self.last_decision or not self.last_decision.ready:
             self.log("Blocked: paper trade requires valid FVG confirmation decision first.")
@@ -453,7 +464,8 @@ class MainWindow(QMainWindow):
                 self.size_box.value(),
                 f"Planned paper trade RR {float(plan.get('rr', 0)):.2f}:1"
             )
-            self.log(f"Opened planned {plan.get('side')} paper trade @ {float(plan['entry']):,.2f} stop {float(plan['stop']):,.2f} target {float(plan['target']):,.2f}")
+            self.chart.set_plan(str(plan.get("side", "LONG")), float(plan["entry"]), float(plan["stop"]), float(plan["target"]), active=True, mode="trade")
+            self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f}")
         except Exception as e:
             self.log(str(e))
 
@@ -466,6 +478,10 @@ class MainWindow(QMainWindow):
             if trade.status == "CLOSED" and id(trade) not in self._learned_closed_trade_ids:
                 self._learned_closed_trade_ids.add(id(trade))
                 self.learning.record_trade_outcome(trade)
+                result = "WIN" if trade.pnl > 0 else "LOSS"
+                self.log_signal(f"CLOSED {result} {trade.side} | exit {float(trade.exit_price or 0):,.2f} | P/L ${trade.pnl:,.2f}")
+                if not self.account.open_trade:
+                    self.chart.clear_plan(emit=False)
                 self.log(f"Learning saved outcome: {trade.side} P/L ${trade.pnl:,.2f}")
 
     def update_learning_panel(self) -> None:
@@ -496,6 +512,33 @@ class MainWindow(QMainWindow):
         else:
             self.trades_box.setPlainText("No closed paper trades yet. The account will update automatically after TP/SL is hit.")
         self.update_learning_panel()
+
+    def log_signal(self, message: str) -> None:
+        from datetime import datetime
+        line = f"{datetime.now().strftime('%H:%M:%S')}  {message}"
+        self._journal_lines.append(line)
+        self._journal_lines = self._journal_lines[-200:]
+        if hasattr(self, "signal_box"):
+            self.signal_box.setPlainText("\n".join(reversed(self._journal_lines)) or "No auto signals yet.")
+        self.logger.info("SIGNAL " + message)
+
+    def update_kalshi_debug(self, snap) -> None:
+        if not hasattr(self, "kalshi_debug_box"):
+            return
+        close = snap.close_time.isoformat() if snap.close_time else "None"
+        updated = f"{time.time() - snap.updated_at:.1f}s ago" if snap.updated_at else "never"
+        text = (
+            "Kalshi BTC15 Sync Debug\n\n"
+            f"Source: {snap.source}\n"
+            f"Ticker: {snap.ticker or 'None'}\n"
+            f"Title: {snap.title or 'None'}\n"
+            f"Close time: {close}\n"
+            f"Time left: {snap.seconds_left()//60:02d}:{snap.seconds_left()%60:02d}\n"
+            f"Updated: {updated}\n"
+            f"Last error: {snap.last_error or 'None'}\n\n"
+            "If source says ESTIMATED, the public Kalshi lookup did not find the same active BTC15 market your app is showing yet."
+        )
+        self.kalshi_debug_box.setPlainText(text)
 
     def log(self, message: str) -> None:
         self.logger.info(message)

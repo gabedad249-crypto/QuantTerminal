@@ -52,6 +52,7 @@ class ChartWidget(QGraphicsView):
             "target": None,
             "rr": 2.0,
             "active": False,
+            "mode": "plan",  # plan = suggested buy-in, trade = actual open paper trade
         }
 
         # Clean-chart defaults. The strategy can still use every FVG internally,
@@ -85,7 +86,7 @@ class ChartWidget(QGraphicsView):
             target = price - risk * rr
         self.set_plan(side, price, stop, target, emit=emit, active=True)
 
-    def set_plan(self, side: str, entry: float, stop: float, target: float, emit: bool = True, active: bool = True) -> None:
+    def set_plan(self, side: str, entry: float, stop: float, target: float, emit: bool = True, active: bool = True, mode: str = "plan") -> None:
         self.trade_plan = {
             "side": side,
             "entry": float(entry),
@@ -93,6 +94,21 @@ class ChartWidget(QGraphicsView):
             "target": float(target),
             "rr": self._calc_rr(side, float(entry), float(stop), float(target)),
             "active": active,
+            "mode": mode,
+        }
+        if emit:
+            self.planChanged.emit(dict(self.trade_plan))
+        self._redraw()
+
+    def clear_plan(self, emit: bool = True) -> None:
+        self.trade_plan = {
+            "side": str(self.trade_plan.get("side") or "LONG"),
+            "entry": None,
+            "stop": None,
+            "target": None,
+            "rr": float(self.trade_plan.get("rr") or 2.0),
+            "active": False,
+            "mode": "plan",
         }
         if emit:
             self.planChanged.emit(dict(self.trade_plan))
@@ -319,7 +335,9 @@ class ChartWidget(QGraphicsView):
         if not self.trade_plan.get("active") or not all(isinstance(v, (int, float)) for v in (entry, stop, target)):
             return
         side = str(self.trade_plan.get("side", "LONG"))
-        vals = [("target", float(target), "#2563eb", "TARGET"), ("entry", float(entry), "#e5e7eb", "ENTRY"), ("stop", float(stop), "#dc2626", "STOP")]
+        mode = str(self.trade_plan.get("mode") or "plan")
+        entry_label = "ENTRY" if mode == "trade" else "BUY-IN"
+        vals = [("target", float(target), "#2563eb", "TARGET"), ("entry", float(entry), "#e5e7eb", entry_label), ("stop", float(stop), "#dc2626", "STOP")]
         for key, price, color, label in vals:
             y = self._y(price)
             pen = QPen(QColor(color), 2 if key == self.drag_line else 1.4)
@@ -327,7 +345,8 @@ class ChartWidget(QGraphicsView):
             self.scene.addRect(self._plot.right() - 92, y - 11, 88, 22, QPen(QColor(color), 1), QBrush(QColor("#111827")))
             self._text(self._plot.right() - 88, y - 8, f"{label} {price:,.0f}", color, 8)
         rr = float(self.trade_plan.get("rr") or 0)
-        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} PLAN • RR {rr:.2f}:1 • drag lines", "#d1d5db", 10)
+        title = "OPEN PAPER TRADE" if mode == "trade" else "AUTO PLAN"
+        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • RR {rr:.2f}:1", "#d1d5db", 10)
 
     def _draw_crosshair(self) -> None:
         if not self.hover_scene:
@@ -391,7 +410,7 @@ class ChartWidget(QGraphicsView):
                     stop = entry + max(entry * 0.0005, 5)
                 if target >= entry:
                     target = entry - max(stop - entry, 5) * 2
-            self.set_plan(side, entry, stop, target)
+            self.set_plan(side, entry, stop, target, mode=str(self.trade_plan.get("mode") or "plan"))
             event.accept()
             return
         if self.dragging_chart and self.last_mouse_x is not None and self.candles:
