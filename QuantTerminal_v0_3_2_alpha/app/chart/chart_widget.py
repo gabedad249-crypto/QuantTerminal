@@ -53,6 +53,14 @@ class ChartWidget(QGraphicsView):
             "active": False,
         }
 
+        # Clean-chart defaults. The strategy can still use every FVG internally,
+        # but the screen only draws the most relevant recent gaps so it doesn't
+        # turn into a wall of BULL/BEAR labels.
+        self.max_gap_boxes = 10
+        self.show_filled_gaps = False
+        self.show_gap_labels = True
+        self.show_swing_labels = True
+
         self._plot = QRectF(60, 12, 900, 360)
         self._hi = 1.0
         self._lo = 0.0
@@ -243,29 +251,41 @@ class ChartWidget(QGraphicsView):
     def _draw_fvgs(self, candles: list[Candle], global_start: int) -> None:
         count = len(candles)
         step = self._plot.width() / max(1, count)
-        for fvg in self.fvgs[-28:]:
-            # Find local candle indexes by timestamp.
+        visible_ts = {int(c.ts) for c in candles}
+        drawable = []
+        for fvg in self.fvgs:
+            if not self.show_filled_gaps and fvg.status == "FILLED":
+                continue
+            # Only show gaps whose creation candles are near/inside the visible range.
+            if not any(int(c.ts) in visible_ts for c in candles if fvg.start_ts <= c.ts <= fvg.end_ts):
+                continue
+            drawable.append(fvg)
+        drawable = drawable[-self.max_gap_boxes:]
+
+        for fvg in drawable:
             indexes = [i for i, c in enumerate(candles) if fvg.start_ts <= c.ts <= fvg.end_ts]
             if not indexes:
                 continue
             start_i = max(0, indexes[0])
-            # Keep projection short so GAP boxes don't cover the whole chart.
-            end_i = min(count - 1, start_i + 12)
-            x1 = self._x(start_i, count) - step * 0.45
-            x2 = self._x(end_i, count) + step * 0.45
+            end_i = min(count - 1, start_i + 10)
+            x1 = self._x(start_i, count) - step * 0.40
+            x2 = self._x(end_i, count) + step * 0.40
             y_top = self._y(fvg.top)
             y_bot = self._y(fvg.bottom)
 
-            fill = QColor("#6b7280")  # neutral grey like requested
-            fill.setAlpha(28 if fvg.status == "FILLED" else 58)
-            border = QColor("#22c55e" if fvg.direction == "BULLISH" else "#ef4444")
-            border.setAlpha(80 if fvg.status == "FILLED" else 180)
+            fill = QColor("#6b7280")
+            fill.setAlpha(22 if fvg.status == "FILLED" else 46)
+            border = QColor("#94a3b8")
+            if fvg.status == "TOUCHED":
+                border = QColor("#f59e0b")
+            border.setAlpha(150)
             pen = QPen(border, 1, Qt.DashLine if fvg.status == "FILLED" else Qt.SolidLine)
             self.scene.addRect(QRectF(x1, min(y_top, y_bot), x2 - x1, max(3, abs(y_bot - y_top))), pen, QBrush(fill))
 
-            side = "BULL" if fvg.direction == "BULLISH" else "BEAR"
-            label = getattr(fvg, "label", "GAP")
-            self._text(x1 + 4, min(y_top, y_bot) + 2, f"{label} • {side}", "#d1d5db", 8)
+            if self.show_gap_labels:
+                # Keep the chart clean: show GAP only, not giant bullish/bearish spam.
+                status = "FILLED" if fvg.status == "FILLED" else ("TOUCHED" if fvg.status == "TOUCHED" else "GAP")
+                self._text(x1 + 4, min(y_top, y_bot) + 2, status, "#e5e7eb", 8)
 
     def _draw_high_low(self, candles: list[Candle]) -> None:
         high_c = max(candles, key=lambda c: c.high)
@@ -277,13 +297,16 @@ class ChartWidget(QGraphicsView):
             self._text(self._plot.left() + 8, y - 16, f"{label} {price:,.2f}", color, 9)
 
     def _draw_swings(self, candles: list[Candle]) -> None:
+        if not self.show_swing_labels:
+            return
         count = len(candles)
-        for i, price, kind in self._find_swings(candles):
+        # Cleaner default: only the most recent major swing points.
+        for i, price, kind in self._find_swings(candles)[-8:]:
             x = self._x(i, count)
             y = self._y(price)
-            label = "SH" if kind == "H" else "SL"
+            label = "H" if kind == "H" else "L"
             color = "#facc15" if kind == "H" else "#93c5fd"
-            self._text(x - 9, y - (18 if kind == "H" else -6), label, color, 8)
+            self._text(x - 6, y - (18 if kind == "H" else -6), label, color, 8)
 
     def _draw_trade_plan(self) -> None:
         entry = self.trade_plan.get("entry")

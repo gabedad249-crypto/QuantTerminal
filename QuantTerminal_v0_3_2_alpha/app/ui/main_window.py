@@ -18,6 +18,7 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
 
 from app.data.coinbase import CoinbaseFeed
 from app.data.candles import CandleBuilder, seconds_until_next_15m
+from app.data.kalshi import KalshiBTC15Timer
 from app.paper.account import PaperAccount
 from app.strategy.setup_engine import FVGSetupEngine
 from app.memory.learning import LearningMemory
@@ -49,6 +50,8 @@ class MainWindow(QMainWindow):
         self.setup_engine = FVGSetupEngine(min_rr=float(settings.get("minimum_rr", 2.0)))
         from pathlib import Path
         self.learning = LearningMemory(Path("memory"))
+        self.kalshi_timer = KalshiBTC15Timer()
+        self._last_kalshi_refresh = 0.0
         self.feed = CoinbaseFeed(lambda p: self.bus.price.emit(p), settings.get("symbol", "BTC-USD"))
 
         self.price_label = QLabel("Price: --")
@@ -61,6 +64,8 @@ class MainWindow(QMainWindow):
         self.chart.planChanged.connect(self.on_chart_plan_changed)
         self.ai_box = QTextEdit(); self.ai_box.setReadOnly(True)
         self.ai_box.setText("AI Engine\n\nWaiting for live candles...\n\nFVG confirmation strategy will plug in here.")
+        self.thinking_box = QTextEdit(); self.thinking_box.setReadOnly(True)
+        self.thinking_box.setText("Thinking Panel\n\nWaiting for candle context...")
         self.stats_label = QLabel()
         self.open_trade_label = QLabel("No open paper trade")
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True)
@@ -140,14 +145,24 @@ class MainWindow(QMainWindow):
         zoom_in = QPushButton("+"); zoom_in.clicked.connect(self.chart.zoom_in)
         reset_view = QPushButton("Fit"); reset_view.clicked.connect(self.chart.reset_view)
         chart_tools.addWidget(QLabel("Zoom")); chart_tools.addWidget(zoom_out); chart_tools.addWidget(zoom_in); chart_tools.addWidget(reset_view)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.1: grey GAP boxes • learning mode • FVG confirmation only"))
+        clean_btn = QPushButton("Clean Chart")
+        clean_btn.clicked.connect(self.clean_chart_view)
+        gap_btn = QPushButton("Toggle Filled Gaps")
+        gap_btn.clicked.connect(self.toggle_filled_gaps)
+        swing_btn = QPushButton("Toggle H/L")
+        swing_btn.clicked.connect(self.toggle_swing_labels)
+        chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.2: Kalshi timer • thinking panel • cleaner GAP overlays"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
 
-        right = self._panel("AI Decision")
-        right.setFixedWidth(370)
-        right.layout().addWidget(self.ai_box)
+        right = self._panel("AI / Thinking")
+        right.setFixedWidth(400)
+        decision_tabs = QTabWidget()
+        decision_tabs.addTab(self.ai_box, "Decision")
+        decision_tabs.addTab(self.thinking_box, "Thinking Checklist")
+        right.layout().addWidget(decision_tabs)
 
         planner = QFrame(); planner.setObjectName("Panel")
         fl = QFormLayout(planner)
@@ -213,8 +228,16 @@ class MainWindow(QMainWindow):
         self.update_stats()
 
     def update_timer(self) -> None:
-        s = seconds_until_next_15m()
-        self.timer_label.setText(f"15m: {s//60:02d}:{s%60:02d}")
+        import time
+        now = time.time()
+        if now - self._last_kalshi_refresh > 20:
+            self._last_kalshi_refresh = now
+            self.kalshi_timer.refresh_async()
+        snap = self.kalshi_timer.snapshot()
+        s = snap.seconds_left()
+        src = "Kalshi" if snap.source == "KALSHI" else "Est"
+        ticker = f" {snap.ticker}" if snap.ticker else ""
+        self.timer_label.setText(f"BTC15 {src}: {s//60:02d}:{s%60:02d}{ticker}")
 
     def update_ai(self, price: float) -> None:
         cs = self.candles.candles
@@ -254,6 +277,60 @@ class MainWindow(QMainWindow):
             old = self.ai_box.verticalScrollBar().value()
             self.ai_box.setPlainText(ai_text)
             self.ai_box.verticalScrollBar().setValue(old)
+            self.update_thinking_panel(d)
+
+    def update_thinking_panel(self, d) -> None:
+        snap = self.kalshi_timer.snapshot()
+        timer_line = f"Kalshi BTC15: {snap.label()} ({snap.source})"
+        if snap.ticker:
+            timer_line += f"\nMarket: {snap.ticker}"
+        if snap.last_error and snap.source != "KALSHI":
+            timer_line += f"\nTimer note: {snap.last_error}"
+
+        checklist = d.checklist or ["❌ Still building candle context"]
+        reasons = d.reasons or ["Monitoring live BTC candles"]
+        plan = "No buy-in yet"
+        if d.ready and d.plan:
+            plan = (
+                f"{d.plan.side} PLAN READY\n"
+                f"Entry:  {d.plan.entry:,.2f}\n"
+                f"Stop:   {d.plan.stop:,.2f}\n"
+                f"Target: {d.plan.target:,.2f}\n"
+                f"RR:     {d.plan.rr:.2f}:1"
+            )
+        text = (
+            "FVG Method Thinking\n\n"
+            f"{timer_line}\n\n"
+            "Question Process\n"
+            "1. Do we have enough 1m candles?\n"
+            "2. Are 15m and 5m trend aligned?\n"
+            "3. Did impulse create a clean FVG/GAP?\n"
+            "4. Did price pull back into the GAP?\n"
+            "5. Did engulfing/rejection confirm?\n"
+            "6. Is RR >= minimum?\n\n"
+            "Live Checklist\n" + "\n".join(checklist[-10:]) + "\n\n"
+            "Why waiting / why ready\n" + "\n".join("• " + r for r in reasons[-8:]) + "\n\n"
+            "Trade Plan\n" + plan
+        )
+        self.thinking_box.setPlainText(text)
+
+    def clean_chart_view(self) -> None:
+        self.chart.max_gap_boxes = 6
+        self.chart.show_filled_gaps = False
+        self.chart.show_gap_labels = True
+        self.chart.show_swing_labels = True
+        self.chart._redraw()
+        self.log("Clean Chart: showing only recent active/touched GAP boxes and recent H/L labels")
+
+    def toggle_filled_gaps(self) -> None:
+        self.chart.show_filled_gaps = not self.chart.show_filled_gaps
+        self.chart._redraw()
+        self.log(f"Filled GAP visibility: {'ON' if self.chart.show_filled_gaps else 'OFF'}")
+
+    def toggle_swing_labels(self) -> None:
+        self.chart.show_swing_labels = not self.chart.show_swing_labels
+        self.chart._redraw()
+        self.log(f"High/Low labels: {'ON' if self.chart.show_swing_labels else 'OFF'}")
 
     def apply_valid_setup_to_chart(self) -> None:
         d = self.last_decision
