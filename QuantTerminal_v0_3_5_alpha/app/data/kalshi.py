@@ -41,7 +41,9 @@ class KalshiMarketClock:
 class KalshiBTC15Timer:
     BASE = "https://external-api.kalshi.com/trade-api/v2"
 
-    def __init__(self) -> None:
+    def __init__(self, target_url: str | None = None) -> None:
+        self.target_url = target_url or "https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/kxbtc15m-26jun280030"
+        self.target_ticker = self._extract_ticker(self.target_url)
         self.clock = KalshiMarketClock()
         self._lock = threading.Lock()
         self._refreshing = False
@@ -65,7 +67,11 @@ class KalshiBTC15Timer:
 
     def _refresh(self) -> None:
         try:
-            market = self._find_active_btc15_market()
+            market = None
+            if self.target_ticker:
+                market = self._get_exact_market(self.target_ticker)
+            if not market:
+                market = self._find_active_btc15_market()
             if not market:
                 self._set_error("No open BTC15 market found; using quarter-hour estimate")
                 return
@@ -90,6 +96,38 @@ class KalshiBTC15Timer:
             self.clock.source = "ESTIMATED"
             self.clock.last_error = message
             self.clock.updated_at = time.time()
+
+
+    def _extract_ticker(self, value: str | None) -> str:
+        if not value:
+            return ""
+        raw = str(value).strip().split("?")[0].rstrip("/")
+        last = raw.split("/")[-1]
+        # Kalshi URLs look like .../kxbtc15m-26jun280030. API tickers are uppercase.
+        return last.upper() if last.upper().startswith("KXBTC15M-") else ""
+
+    def set_target_url(self, value: str) -> None:
+        with self._lock:
+            self.target_url = value.strip()
+            self.target_ticker = self._extract_ticker(self.target_url)
+            self.clock.last_error = "Target market changed; refreshing..."
+        self.refresh_async()
+
+    def _get_exact_market(self, ticker: str) -> Optional[dict]:
+        if not ticker:
+            return None
+        try:
+            url = f"{self.BASE}/markets/{ticker}"
+            req = Request(url, headers={"User-Agent": "QuantTerminal/0.3.5"})
+            with urlopen(req, timeout=7) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            market = data.get("market") or data
+            if isinstance(market, dict) and market.get("ticker"):
+                return market
+        except Exception as exc:
+            with self._lock:
+                self.clock.last_error = f"Exact ticker {ticker} lookup failed: {str(exc)[:100]}"
+        return None
 
     def _parse_time(self, value: str | None) -> Optional[datetime]:
         if not value:

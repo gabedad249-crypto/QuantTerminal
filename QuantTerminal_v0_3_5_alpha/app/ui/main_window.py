@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QTabWidget, QPushButton, QListWidget, QTextEdit, QDoubleSpinBox,
-    QComboBox, QFormLayout, QCheckBox
+    QComboBox, QFormLayout, QCheckBox, QLineEdit
 )
 from app.chart.chart_widget import ChartWidget
 
@@ -50,6 +50,7 @@ class MainWindow(QMainWindow):
         self._last_auto_plan_sig = ""
         self._last_ready_signal_sig = ""
         self._journal_lines: list[str] = []
+        self._auto_opened_signal_sig = ""
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
@@ -58,7 +59,7 @@ class MainWindow(QMainWindow):
         self.setup_engine = FVGSetupEngine(min_rr=float(settings.get("minimum_rr", 2.0)))
         from pathlib import Path
         self.learning = LearningMemory(Path("memory"))
-        self.kalshi_timer = KalshiBTC15Timer()
+        self.kalshi_timer = KalshiBTC15Timer(settings.get("kalshi_market_url", "https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/kxbtc15m-26jun280030"))
         self._last_kalshi_refresh = 0.0
         self.feed = CoinbaseFeed(lambda p: self.bus.price.emit(p), settings.get("symbol", "BTC-USD"))
 
@@ -84,6 +85,10 @@ class MainWindow(QMainWindow):
         self.learning_toggle = QCheckBox("Learning Mode")
         self.learning_toggle.setChecked(True)
         self.learning_toggle.stateChanged.connect(self.on_learning_toggle)
+        self.auto_paper_toggle = QCheckBox("Auto-open paper when ready")
+        self.auto_paper_toggle.setChecked(False)
+        self.kalshi_url_box = QLineEdit(settings.get("kalshi_market_url", "https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/kxbtc15m-26jun280030"))
+        self.kalshi_url_box.setPlaceholderText("Paste Kalshi BTC15 market URL")
 
         self.side_box = QComboBox(); self.side_box.addItems(["LONG", "SHORT"])
         self.size_box = NoWheelDoubleSpinBox(); self.size_box.setRange(10, 100000); self.size_box.setValue(1000); self.size_box.setPrefix("$")
@@ -162,7 +167,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.4: auto signal engine • no fake entry • journal + Kalshi debug"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.5: exact Kalshi URL • readiness border • auto paper mode"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -184,9 +189,10 @@ class MainWindow(QMainWindow):
         fl.addRow("Stop", self.stop_price_box)
         fl.addRow("Target", self.target_price_box)
         fl.addRow("Ratio", self.plan_rr_label)
-        open_btn = QPushButton("Open Auto Plan Paper Trade")
-        open_btn.clicked.connect(self.open_planned_trade)
-        fl.addRow(open_btn)
+        self.open_btn = QPushButton("Open Auto Plan Paper Trade")
+        self.open_btn.clicked.connect(self.open_planned_trade)
+        fl.addRow(self.open_btn)
+        fl.addRow("Auto paper", self.auto_paper_toggle)
         note = QLabel("Auto plan appears only after FVG + pullback + confirmation")
         note.setObjectName("Muted")
         fl.addRow(note)
@@ -202,7 +208,13 @@ class MainWindow(QMainWindow):
         learning_l.addWidget(self.learning_toggle)
         learning_l.addWidget(self.learning_box)
         signal_tab = QWidget(); signal_l = QVBoxLayout(signal_tab); signal_l.addWidget(self.signal_box)
-        kalshi_tab = QWidget(); kalshi_l = QVBoxLayout(kalshi_tab); kalshi_l.addWidget(self.kalshi_debug_box)
+        kalshi_tab = QWidget(); kalshi_l = QVBoxLayout(kalshi_tab)
+        apply_kalshi = QPushButton("Sync this Kalshi URL")
+        apply_kalshi.clicked.connect(self.apply_kalshi_url)
+        kalshi_l.addWidget(QLabel("Kalshi BTC15 market URL"))
+        kalshi_l.addWidget(self.kalshi_url_box)
+        kalshi_l.addWidget(apply_kalshi)
+        kalshi_l.addWidget(self.kalshi_debug_box)
         tabs.addTab(paper, "Paper Trading")
         tabs.addTab(signal_tab, "Signal Journal")
         tabs.addTab(learning_tab, "Learning")
@@ -245,6 +257,7 @@ class MainWindow(QMainWindow):
         self.last_decision = self.setup_engine.evaluate(candles)
         self.learning.record_snapshot(price, self.last_decision)
         self.auto_manage_signal_plan()
+        self.update_trade_button_state()
 
         sig = self._decision_signature(self.last_decision)
         if now - self._last_ai_update_ts >= 1.25 or sig != self._last_decision_signature:
@@ -391,6 +404,28 @@ class MainWindow(QMainWindow):
         self.chart._redraw()
         self.log(f"High/Low labels: {'ON' if self.chart.show_swing_labels else 'OFF'}")
 
+    def update_trade_button_state(self) -> None:
+        ready = bool(self.last_decision and self.last_decision.ready and getattr(self.last_decision, "plan", None))
+        has_open = bool(self.account.open_trade)
+        if has_open:
+            text = "Paper Trade Open"
+            css = "QPushButton { border: 2px solid #2563eb; color: #bfdbfe; font-weight: 700; }"
+        elif ready:
+            text = "Open Auto Plan Paper Trade"
+            css = "QPushButton { border: 2px solid #22c55e; color: #bbf7d0; font-weight: 700; }"
+        else:
+            text = "Waiting For Valid Setup"
+            css = "QPushButton { border: 2px solid #dc2626; color: #fecaca; font-weight: 700; }"
+        if hasattr(self, "open_btn"):
+            self.open_btn.setText(text)
+            self.open_btn.setStyleSheet(css)
+            self.open_btn.setEnabled(ready and not has_open)
+
+    def apply_kalshi_url(self) -> None:
+        url = self.kalshi_url_box.text().strip()
+        self.kalshi_timer.set_target_url(url)
+        self.log(f"Kalshi target URL set: {url}")
+
     def auto_manage_signal_plan(self) -> None:
         """Create/clear the chart plan from the strategy only.
 
@@ -416,6 +451,10 @@ class MainWindow(QMainWindow):
             f"AUTO PLAN {d.plan.side} | buy-in {d.plan.entry:,.2f} | stop {d.plan.stop:,.2f} | "
             f"target {d.plan.target:,.2f} | RR {d.plan.rr:.2f}:1 | confidence {d.confidence}% | grade {d.grade}"
         )
+        # Major feature: optional hands-free paper mode. OFF by default.
+        if self.auto_paper_toggle.isChecked() and not self.account.open_trade and sig != self._auto_opened_signal_sig:
+            self._auto_opened_signal_sig = sig
+            self.open_planned_trade()
 
     def on_chart_plan_changed(self, plan: dict) -> None:
         self._syncing_plan = True
@@ -472,6 +511,7 @@ class MainWindow(QMainWindow):
     def on_learning_toggle(self) -> None:
         self.learning.enabled = self.learning_toggle.isChecked()
         self.update_learning_panel()
+        self.update_trade_button_state()
 
     def capture_closed_trades_for_learning(self) -> None:
         for trade in self.account.trades:
@@ -512,6 +552,7 @@ class MainWindow(QMainWindow):
         else:
             self.trades_box.setPlainText("No closed paper trades yet. The account will update automatically after TP/SL is hit.")
         self.update_learning_panel()
+        self.update_trade_button_state()
 
     def log_signal(self, message: str) -> None:
         from datetime import datetime
@@ -530,7 +571,9 @@ class MainWindow(QMainWindow):
         text = (
             "Kalshi BTC15 Sync Debug\n\n"
             f"Source: {snap.source}\n"
-            f"Ticker: {snap.ticker or 'None'}\n"
+            f"Target URL: {self.kalshi_url_box.text().strip()}\n"
+            f"Target ticker: {getattr(self.kalshi_timer, 'target_ticker', '') or 'None'}\n"
+            f"Matched ticker: {snap.ticker or 'None'}\n"
             f"Title: {snap.title or 'None'}\n"
             f"Close time: {close}\n"
             f"Time left: {snap.seconds_left()//60:02d}:{snap.seconds_left()%60:02d}\n"
