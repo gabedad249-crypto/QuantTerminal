@@ -1,0 +1,381 @@
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt, Signal, QPointF, QRectF
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QWheelEvent
+from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
+
+from app.strategy.fvg_engine import Candle, FVG, FVGEngine
+
+
+class ChartWidget(QGraphicsView):
+    """v0.2.0 chart rewrite.
+
+    This replaces the old raw QWidget painter with a QGraphicsView scene. It is
+    still not TradingView-level yet, but it fixes the biggest prototype issues:
+    real wheel zoom, drag-pan, no full-window flashing, cleaner candle sizing,
+    shorter FVG boxes, HH/LL markers, and a more stable trade planner overlay.
+    """
+
+    planChanged = Signal(dict)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scene = QGraphicsScene(self)
+        self.setScene(self.scene)
+        self.setMinimumSize(760, 440)
+        self.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
+        self.setResizeAnchor(QGraphicsView.NoAnchor)
+        self.setMouseTracking(True)
+        self.setDragMode(QGraphicsView.NoDrag)
+        self.setBackgroundBrush(QBrush(QColor("#0b0f14")))
+
+        self.candles: list[Candle] = []
+        self.fvgs: list[FVG] = []
+        self.engine = FVGEngine()
+        self.visible_bars = 80
+        self.offset = 0
+        self.last_mouse_x: float | None = None
+        self.drag_line: str | None = None
+        self.hover_scene: QPointF | None = None
+        self.dragging_chart = False
+
+        self.trade_plan = {
+            "side": "LONG",
+            "entry": None,
+            "stop": None,
+            "target": None,
+            "rr": 2.0,
+        }
+
+        self._plot = QRectF(60, 12, 900, 360)
+        self._hi = 1.0
+        self._lo = 0.0
+
+    # ---------- public API used by MainWindow ----------
+    def set_candles(self, candles: list[Candle]) -> None:
+        self.candles = candles[-800:]
+        self.fvgs = self.engine.detect(self.candles)
+        if self.candles and self.trade_plan["entry"] is None:
+            self.create_default_plan(self.candles[-1].close, emit=False)
+        self._redraw()
+
+    def create_default_plan(self, price: float, side: str | None = None, rr: float | None = None, emit: bool = True) -> None:
+        side = side or str(self.trade_plan.get("side") or "LONG")
+        rr = rr if rr is not None else float(self.trade_plan.get("rr") or 2.0)
+        risk = max(price * 0.001, 10.0)
+        if side == "LONG":
+            stop = price - risk
+            target = price + risk * rr
+        else:
+            stop = price + risk
+            target = price - risk * rr
+        self.set_plan(side, price, stop, target, emit=emit)
+
+    def set_plan(self, side: str, entry: float, stop: float, target: float, emit: bool = True) -> None:
+        self.trade_plan = {
+            "side": side,
+            "entry": float(entry),
+            "stop": float(stop),
+            "target": float(target),
+            "rr": self._calc_rr(side, float(entry), float(stop), float(target)),
+        }
+        if emit:
+            self.planChanged.emit(dict(self.trade_plan))
+        self._redraw()
+
+    def zoom_in(self) -> None:
+        self.visible_bars = max(18, int(self.visible_bars * 0.82))
+        self._clamp_offset()
+        self._redraw()
+
+    def zoom_out(self) -> None:
+        self.visible_bars = min(260, int(self.visible_bars * 1.22))
+        self._clamp_offset()
+        self._redraw()
+
+    def reset_view(self) -> None:
+        self.visible_bars = 80
+        self.offset = 0
+        self._redraw()
+
+    # ---------- math/mapping ----------
+    def _visible(self):
+        if not self.candles:
+            return [], 0, 0
+        n = max(5, min(len(self.candles), self.visible_bars))
+        end = len(self.candles) - self.offset
+        end = max(n, min(len(self.candles), end))
+        start = max(0, end - n)
+        return self.candles[start:end], start, end
+
+    def _clamp_offset(self) -> None:
+        if not self.candles:
+            self.offset = 0
+            return
+        max_offset = max(0, len(self.candles) - min(len(self.candles), self.visible_bars))
+        self.offset = max(0, min(max_offset, self.offset))
+
+    def _calc_rr(self, side: str, entry: float, stop: float, target: float) -> float:
+        if side == "LONG":
+            risk = max(entry - stop, 0.0001)
+            reward = target - entry
+        else:
+            risk = max(stop - entry, 0.0001)
+            reward = entry - target
+        return max(0.0, reward / risk)
+
+    def _price_range(self, candles: list[Candle]) -> tuple[float, float]:
+        hi = max(c.high for c in candles)
+        lo = min(c.low for c in candles)
+        for key in ("entry", "stop", "target"):
+            val = self.trade_plan.get(key)
+            if isinstance(val, (int, float)):
+                hi = max(hi, float(val))
+                lo = min(lo, float(val))
+        if hi == lo:
+            hi += 1
+            lo -= 1
+        pad = max((hi - lo) * 0.10, 1.0)
+        return hi + pad, lo - pad
+
+    def _x(self, local_index: int, count: int) -> float:
+        return self._plot.left() + (local_index + 0.5) * (self._plot.width() / max(1, count))
+
+    def _y(self, price: float) -> float:
+        return self._plot.top() + (self._hi - price) / max(0.0001, (self._hi - self._lo)) * self._plot.height()
+
+    def _price_from_scene_y(self, y: float) -> float:
+        y = max(self._plot.top(), min(self._plot.bottom(), y))
+        return self._hi - ((y - self._plot.top()) / max(1, self._plot.height())) * (self._hi - self._lo)
+
+    def _hit_plan_line(self, scene_y: float) -> str | None:
+        for key in ("target", "entry", "stop"):
+            val = self.trade_plan.get(key)
+            if isinstance(val, (int, float)) and abs(self._y(float(val)) - scene_y) <= 8:
+                return key
+        return None
+
+    def _find_swings(self, candles: list[Candle], strength: int = 2):
+        swings = []
+        if len(candles) < strength * 2 + 1:
+            return swings
+        for i in range(strength, len(candles) - strength):
+            c = candles[i]
+            left = candles[i-strength:i]
+            right = candles[i+1:i+strength+1]
+            if all(c.high > x.high for x in left + right):
+                swings.append((i, c.high, "H"))
+            if all(c.low < x.low for x in left + right):
+                swings.append((i, c.low, "L"))
+        return swings[-18:]
+
+    # ---------- drawing ----------
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._redraw()
+
+    def _redraw(self) -> None:
+        # One scene clear per app tick is still not final, but QGraphicsView avoids
+        # the old full-widget flicker and makes zoom/pan usable.
+        self.scene.clear()
+        w = max(640, self.viewport().width())
+        h = max(360, self.viewport().height())
+        self.scene.setSceneRect(0, 0, w, h)
+        self._plot = QRectF(62, 16, w - 118, h - 58)
+
+        self._draw_background(w, h)
+        candles, global_start, _ = self._visible()
+        if not candles:
+            self._text(w / 2 - 120, h / 2, "Waiting for live BTC candles...", "#8f9bad", 14)
+            return
+
+        self._hi, self._lo = self._price_range(candles)
+        self._draw_axes(candles)
+        self._draw_fvgs(candles, global_start)
+        self._draw_candles(candles)
+        self._draw_high_low(candles)
+        self._draw_swings(candles)
+        self._draw_trade_plan()
+        self._draw_crosshair()
+        self.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+        self.resetTransform()  # keep scene pixels 1:1; zoom is logical via visible_bars
+
+    def _draw_background(self, w: int, h: int) -> None:
+        self.scene.addRect(0, 0, w, h, QPen(Qt.NoPen), QBrush(QColor("#0b0f14")))
+        grid_pen = QPen(QColor("#1a2330"), 1)
+        for i in range(1, 6):
+            y = self._plot.top() + self._plot.height() * i / 6
+            self.scene.addLine(self._plot.left(), y, self._plot.right(), y, grid_pen)
+        for i in range(1, 8):
+            x = self._plot.left() + self._plot.width() * i / 8
+            self.scene.addLine(x, self._plot.top(), x, self._plot.bottom(), grid_pen)
+
+    def _draw_axes(self, candles: list[Candle]) -> None:
+        axis_pen = QPen(QColor("#243244"), 1)
+        self.scene.addRect(self._plot, axis_pen, QBrush(Qt.NoBrush))
+        for i in range(6):
+            price = self._lo + (self._hi - self._lo) * i / 5
+            y = self._y(price)
+            self._text(self._plot.right() + 8, y - 8, f"{price:,.0f}", "#7d8999", 9)
+
+    def _draw_candles(self, candles: list[Candle]) -> None:
+        count = len(candles)
+        step = self._plot.width() / max(1, count)
+        body_w = max(3, min(14, step * 0.58))
+        for i, c in enumerate(candles):
+            x = self._x(i, count)
+            up = c.close >= c.open
+            color = QColor("#22c55e" if up else "#ef4444")
+            pen = QPen(color, 1)
+            self.scene.addLine(x, self._y(c.high), x, self._y(c.low), pen)
+            y1 = self._y(max(c.open, c.close))
+            y2 = self._y(min(c.open, c.close))
+            rect_h = max(1.5, y2 - y1)
+            self.scene.addRect(x - body_w / 2, y1, body_w, rect_h, pen, QBrush(color))
+
+    def _draw_fvgs(self, candles: list[Candle], global_start: int) -> None:
+        count = len(candles)
+        step = self._plot.width() / max(1, count)
+        for fvg in self.fvgs[-20:]:
+            # Find local candle indexes by timestamp.
+            indexes = [i for i, c in enumerate(candles) if fvg.start_ts <= c.ts <= fvg.end_ts]
+            if not indexes:
+                continue
+            start_i = max(0, indexes[0])
+            # Short projection, not huge full-screen boxes.
+            end_i = min(count - 1, start_i + 10)
+            x1 = self._x(start_i, count) - step * 0.45
+            x2 = self._x(end_i, count) + step * 0.45
+            y_top = self._y(fvg.top)
+            y_bot = self._y(fvg.bottom)
+            color = QColor("#16a34a" if fvg.direction == "BULLISH" else "#dc2626")
+            color.setAlpha(45)
+            border = QColor("#22c55e" if fvg.direction == "BULLISH" else "#ef4444")
+            border.setAlpha(135)
+            self.scene.addRect(QRectF(x1, min(y_top, y_bot), x2 - x1, abs(y_bot - y_top)), QPen(border, 1), QBrush(color))
+            self._text(x1 + 4, min(y_top, y_bot) + 2, fvg.direction.replace("ISH", ""), border.name(), 8)
+
+    def _draw_high_low(self, candles: list[Candle]) -> None:
+        high_c = max(candles, key=lambda c: c.high)
+        low_c = min(candles, key=lambda c: c.low)
+        for price, label, color in [(high_c.high, "Range High", "#f59e0b"), (low_c.low, "Range Low", "#60a5fa")]:
+            y = self._y(price)
+            pen = QPen(QColor(color), 1, Qt.DashLine)
+            self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
+            self._text(self._plot.left() + 8, y - 16, f"{label} {price:,.2f}", color, 9)
+
+    def _draw_swings(self, candles: list[Candle]) -> None:
+        count = len(candles)
+        for i, price, kind in self._find_swings(candles):
+            x = self._x(i, count)
+            y = self._y(price)
+            label = "SH" if kind == "H" else "SL"
+            color = "#facc15" if kind == "H" else "#93c5fd"
+            self._text(x - 9, y - (18 if kind == "H" else -6), label, color, 8)
+
+    def _draw_trade_plan(self) -> None:
+        entry = self.trade_plan.get("entry")
+        stop = self.trade_plan.get("stop")
+        target = self.trade_plan.get("target")
+        if not all(isinstance(v, (int, float)) for v in (entry, stop, target)):
+            return
+        side = str(self.trade_plan.get("side", "LONG"))
+        vals = [("target", float(target), "#2563eb", "TARGET"), ("entry", float(entry), "#e5e7eb", "ENTRY"), ("stop", float(stop), "#dc2626", "STOP")]
+        for key, price, color, label in vals:
+            y = self._y(price)
+            pen = QPen(QColor(color), 2 if key == self.drag_line else 1.4)
+            self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
+            self.scene.addRect(self._plot.right() - 92, y - 11, 88, 22, QPen(QColor(color), 1), QBrush(QColor("#111827")))
+            self._text(self._plot.right() - 88, y - 8, f"{label} {price:,.0f}", color, 8)
+        rr = float(self.trade_plan.get("rr") or 0)
+        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} PLAN • RR {rr:.2f}:1 • drag lines", "#d1d5db", 10)
+
+    def _draw_crosshair(self) -> None:
+        if not self.hover_scene:
+            return
+        x = self.hover_scene.x()
+        y = self.hover_scene.y()
+        if not self._plot.contains(x, y):
+            return
+        pen = QPen(QColor("#64748b"), 1, Qt.DashLine)
+        self.scene.addLine(x, self._plot.top(), x, self._plot.bottom(), pen)
+        self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
+        price = self._price_from_scene_y(y)
+        self.scene.addRect(self._plot.right() - 88, y - 10, 84, 20, QPen(QColor("#64748b"), 1), QBrush(QColor("#0f172a")))
+        self._text(self._plot.right() - 82, y - 7, f"{price:,.2f}", "#cbd5e1", 8)
+
+    def _text(self, x: float, y: float, text: str, color: str, size: int = 10) -> None:
+        item = self.scene.addText(text, QFont("Segoe UI", size))
+        item.setDefaultTextColor(QColor(color))
+        item.setPos(x, y)
+
+    # ---------- events ----------
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        event.accept()
+
+    def mousePressEvent(self, event) -> None:
+        scene_pos = self.mapToScene(event.position().toPoint())
+        if event.button() == Qt.LeftButton:
+            hit = self._hit_plan_line(scene_pos.y()) if self.candles else None
+            if hit:
+                self.drag_line = hit
+                event.accept()
+                return
+            self.dragging_chart = True
+            self.last_mouse_x = event.position().x()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        scene_pos = self.mapToScene(event.position().toPoint())
+        self.hover_scene = scene_pos
+        if self.drag_line:
+            price = self._price_from_scene_y(scene_pos.y())
+            plan = dict(self.trade_plan)
+            plan[self.drag_line] = price
+            side = str(plan.get("side", "LONG"))
+            entry = float(plan.get("entry") or price)
+            stop = float(plan.get("stop") or price)
+            target = float(plan.get("target") or price)
+            if side == "LONG":
+                if stop >= entry:
+                    stop = entry - max(entry * 0.0005, 5)
+                if target <= entry:
+                    target = entry + max(entry - stop, 5) * 2
+            else:
+                if stop <= entry:
+                    stop = entry + max(entry * 0.0005, 5)
+                if target >= entry:
+                    target = entry - max(stop - entry, 5) * 2
+            self.set_plan(side, entry, stop, target)
+            event.accept()
+            return
+        if self.dragging_chart and self.last_mouse_x is not None and self.candles:
+            dx = event.position().x() - self.last_mouse_x
+            threshold = max(3, self._plot.width() / max(1, self.visible_bars))
+            bars = int(dx / threshold)
+            if bars:
+                self.offset += bars
+                self._clamp_offset()
+                self.last_mouse_x = event.position().x()
+                self._redraw()
+            event.accept()
+            return
+        self._redraw()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self.drag_line = None
+        self.dragging_chart = False
+        self.last_mouse_x = None
+        super().mouseReleaseEvent(event)

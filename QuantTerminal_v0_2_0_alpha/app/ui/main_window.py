@@ -1,10 +1,21 @@
-from PySide6.QtCore import QTimer, Signal, QObject
+from PySide6.QtCore import QTimer, Signal, QObject, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QTabWidget, QPushButton, QListWidget, QTextEdit, QDoubleSpinBox,
     QComboBox, QFormLayout
 )
 from app.chart.chart_widget import ChartWidget
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """Prevents accidental scroll-wheel value changes inside the order panel."""
+    def wheelEvent(self, event):
+        if not self.hasFocus():
+            event.ignore()
+            return
+        super().wheelEvent(event)
+
 from app.data.coinbase import CoinbaseFeed
 from app.data.candles import CandleBuilder, seconds_until_next_15m
 from app.paper.account import PaperAccount
@@ -47,9 +58,9 @@ class MainWindow(QMainWindow):
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True)
 
         self.side_box = QComboBox(); self.side_box.addItems(["LONG", "SHORT"])
-        self.size_box = QDoubleSpinBox(); self.size_box.setRange(10, 100000); self.size_box.setValue(1000); self.size_box.setPrefix("$")
-        self.stop_box = QDoubleSpinBox(); self.stop_box.setRange(0.01, 10); self.stop_box.setValue(0.10); self.stop_box.setSuffix("% default stop")
-        self.rr_box = QDoubleSpinBox(); self.rr_box.setRange(0.5, 10); self.rr_box.setValue(2.0); self.rr_box.setSuffix("R")
+        self.size_box = NoWheelDoubleSpinBox(); self.size_box.setRange(10, 100000); self.size_box.setValue(1000); self.size_box.setPrefix("$")
+        self.stop_box = NoWheelDoubleSpinBox(); self.stop_box.setRange(0.01, 10); self.stop_box.setValue(0.10); self.stop_box.setSuffix("% default stop")
+        self.rr_box = NoWheelDoubleSpinBox(); self.rr_box.setRange(0.5, 10); self.rr_box.setValue(2.0); self.rr_box.setSuffix("R")
 
         self.entry_price_box = self._price_spin()
         self.stop_price_box = self._price_spin()
@@ -72,14 +83,14 @@ class MainWindow(QMainWindow):
 
         self.tick_timer = QTimer(self)
         self.tick_timer.timeout.connect(self.process_latest_price)
-        self.tick_timer.start(300)  # modest throttle while the placeholder canvas exists
+        self.tick_timer.start(250)  # live but throttled enough to keep UI smooth
 
         self.update_stats()
         self.feed.start()
         self.logger.info("Quant Terminal started")
 
     def _price_spin(self) -> QDoubleSpinBox:
-        box = QDoubleSpinBox()
+        box = NoWheelDoubleSpinBox()
         box.setRange(1, 10000000)
         box.setDecimals(2)
         box.setSingleStep(10)
@@ -115,7 +126,7 @@ class MainWindow(QMainWindow):
         zoom_in = QPushButton("+"); zoom_in.clicked.connect(self.chart.zoom_in)
         reset_view = QPushButton("Fit"); reset_view.clicked.connect(self.chart.reset_view)
         chart_tools.addWidget(QLabel("Zoom")); chart_tools.addWidget(zoom_out); chart_tools.addWidget(zoom_in); chart_tools.addWidget(reset_view)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.1.3: draggable trade planner; pro chart replacement still coming"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.2.0: rewritten chart engine • wheel zoom • drag pan • cleaner overlays"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
