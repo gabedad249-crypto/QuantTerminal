@@ -87,6 +87,7 @@ class MainWindow(QMainWindow):
         self.kalshi_debug_box = QTextEdit(); self.kalshi_debug_box.setReadOnly(True)
         self.backtest_box = QTextEdit(); self.backtest_box.setReadOnly(True)
         self.memory_stats_box = QTextEdit(); self.memory_stats_box.setReadOnly(True)
+        self.auto_tune_box = QTextEdit(); self.auto_tune_box.setReadOnly(True)
         self.learning_toggle = QCheckBox("Learning Mode")
         self.learning_toggle.setChecked(True)
         self.learning_toggle.stateChanged.connect(self.on_learning_toggle)
@@ -172,7 +173,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.8: category BTC15 sync • backtest/replay • memory stats • exports"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.9: Kalshi server-time sync • similarity scoring • safe auto-tune"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -219,8 +220,12 @@ class MainWindow(QMainWindow):
         learning_l.addWidget(self.learning_toggle)
         learning_l.addWidget(self.learning_box)
         memory_tab = QWidget(); memory_l = QVBoxLayout(memory_tab)
-        memory_l.addWidget(QLabel("Memory Stats — shows learned paper outcomes and current edge notes"))
+        memory_l.addWidget(QLabel("Memory Stats — similarity scoring + learned paper outcomes"))
         memory_l.addWidget(self.memory_stats_box)
+        tune_btn = QPushButton("Apply Safe Auto-Tune")
+        tune_btn.clicked.connect(self.apply_auto_tune)
+        memory_l.addWidget(tune_btn)
+        memory_l.addWidget(self.auto_tune_box)
         backtest_tab = QWidget(); backtest_l = QVBoxLayout(backtest_tab)
         run_backtest = QPushButton("Run FVG Replay Backtest")
         run_backtest.clicked.connect(self.run_replay_backtest)
@@ -359,6 +364,8 @@ class MainWindow(QMainWindow):
 
         checklist = "\n".join(d.checklist[-8:]) if d.checklist else "Building candle context..."
         reasons = "\n".join("• " + r for r in d.reasons[-6:]) if d.reasons else "• Monitoring"
+        sim = self.learning.similarity(d)
+        sim_text = f"{sim['matches']} matches | {sim['win_rate']:.1f}% WR | avg ${sim['avg_pnl']:.2f} | score {sim['score']}/100 | {sim['label']}"
 
         ai_text = (
             f"FVG Confirmation Engine\n\n"
@@ -386,6 +393,7 @@ class MainWindow(QMainWindow):
 
         checklist = d.checklist or ["❌ Still building candle context"]
         reasons = d.reasons or ["Monitoring live BTC candles"]
+        sim = self.learning.similarity(d)
         plan = "No buy-in yet"
         if d.ready and d.plan:
             plan = (
@@ -531,7 +539,7 @@ class MainWindow(QMainWindow):
                 float(plan["stop"]),
                 float(plan["target"]),
                 self.size_box.value(),
-                f"Planned paper trade RR {float(plan.get('rr', 0)):.2f}:1"
+                f"FVG setup | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | confidence {self.last_decision.confidence}% | RR {float(plan.get('rr', 0)):.2f}:1"
             )
             self.chart.set_plan(str(plan.get("side", "LONG")), float(plan["entry"]), float(plan["stop"]), float(plan["target"]), active=True, mode="trade")
             self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f}")
@@ -558,7 +566,7 @@ class MainWindow(QMainWindow):
 
     def update_learning_panel(self) -> None:
         if hasattr(self, "learning_box"):
-            self.learning_box.setPlainText(self.learning.summary_text())
+            self.learning_box.setPlainText(self.learning.summary_text(self.last_decision))
 
     def update_stats(self) -> None:
         s = self.account.stats()
