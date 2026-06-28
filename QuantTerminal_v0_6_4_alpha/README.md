@@ -1,14 +1,14 @@
-# Quant Terminal v0.6.3 Alpha
+# Quant Terminal v0.6.4 Alpha
 
 FVG-focused paper-training and recommendation terminal.
 
-## What changed in v0.6.3
+## What changed in v0.6.4
 
-- Fixed the RR display not showing clearly.
-- Added an always-visible **Live RR** line beside the paper controls.
-- RR now updates even before a valid setup exists.
-- AI / Thinking panels show **Configured Cash RR** at all times.
-- Kept cash-based planning:
+- Removed the extra **Live RR** row.
+- The existing **Ratio** row now updates live while typing.
+- Values like `0.50` are parsed instantly as fifty cents.
+- Stop loss USD and Target payout USD now update the chart plan without waiting for Enter/focus loss.
+- AI / Thinking updates from the same cash math:
   `RR = target payout USD / stop loss USD`.
 
 Example:
@@ -17,7 +17,7 @@ Example:
 Buy-in USD: $20.00
 Stop loss USD: $0.50
 Target payout USD: $1.00
-RR: 2.00:1
+Ratio: RR 2.00:1
 ```
 
 ## Important
@@ -29,7 +29,7 @@ Your controls decide sizing:
 - Buy-in USD = fake position size
 - Stop loss USD = cash risk
 - Target payout USD = cash goal
-- Live RR = payout ÷ stop loss
+- Ratio = payout ÷ stop loss
 - Min setup RR filter = quality threshold the bot/autotune uses
 
 ## Modes
@@ -50,6 +50,6 @@ run_quant_terminal.bat
 
 ```bat
 git add .
-git commit -m "Fix always visible cash RR display"
+git commit -m "Fix live ratio cash input updates"
 git push
 ```

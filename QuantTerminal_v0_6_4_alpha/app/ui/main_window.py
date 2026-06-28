@@ -133,6 +133,11 @@ class MainWindow(QMainWindow):
         self.rr_box.valueChanged.connect(self.rebuild_plan_from_inputs)
         self.min_rr_box.valueChanged.connect(self.on_min_rr_changed)
         self.stop_box.valueChanged.connect(self.rebuild_plan_from_inputs)
+        for _cash_box in (self.size_box, self.stop_box, self.rr_box):
+            # valueChanged can wait until the spinbox commits text. textEdited makes
+            # Ratio update while you type values like 0.50.
+            _cash_box.lineEdit().textEdited.connect(self.on_cash_text_edited)
+            _cash_box.editingFinished.connect(self.rebuild_plan_from_inputs)
         self.entry_price_box.valueChanged.connect(self.on_plan_inputs_changed)
         self.stop_price_box.valueChanged.connect(self.on_plan_inputs_changed)
         self.target_price_box.valueChanged.connect(self.on_plan_inputs_changed)
@@ -198,7 +203,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.6.3: always-visible RR • cash risk/payout • dynamic AI plan"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.6.4: live Ratio field • instant cash stop/payout updates"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -220,7 +225,6 @@ class MainWindow(QMainWindow):
         side_help.setObjectName("Muted")
         fl.addRow(side_help)
         fl.addRow("Mode", self.mode_box)
-        fl.addRow("Live RR", self.config_rr_label)
         fl.addRow("Buy-in USD", self.size_box)
         fl.addRow("Stop loss USD", self.stop_box)
         fl.addRow("Target payout USD", self.rr_box)
@@ -230,7 +234,7 @@ class MainWindow(QMainWindow):
         fl.addRow("Planned target", self.target_price_box)
         fl.addRow("Ratio", self.plan_rr_label)
         fl.addRow("Auto paper", self.auto_paper_toggle)
-        note = QLabel("Training mode auto-opens paper trades only after READY. Stop loss and payout are cash values, so 0.50 means fifty cents. RR is calculated live from payout ÷ stop loss. Min setup RR is the quality filter auto-tune adjusts.")
+        note = QLabel("Training mode auto-opens paper trades only after READY. Stop loss and payout are cash values, so 0.50 means fifty cents. The Ratio row updates live from target payout ÷ stop loss. Min setup RR is the quality filter auto-tune adjusts.")
         note.setObjectName("Muted")
         fl.addRow(note)
         right.layout().addWidget(planner)
@@ -477,7 +481,7 @@ class MainWindow(QMainWindow):
         sim_text = f"{sim['matches']} matches | {sim['win_rate']:.1f}% WR | avg ${sim['avg_pnl']:.2f} | score {sim['score']}/100 | {sim['label']}"
 
         ai_text = (
-            f"FVG Logic Engine v0.6.3\n\n"
+            f"FVG Logic Engine v0.6.4\n\n"
             f"State\n{getattr(d, 'state', 'UNKNOWN')}\n\n"
             f"Decision\n{('READY ' + d.side) if d.ready else 'WAIT'}\n\n"
             f"Grade / Confidence\n{d.grade} / {d.confidence}%\n\n"
@@ -667,11 +671,57 @@ class MainWindow(QMainWindow):
         self.log(f"Mode set: {mode}")
         self.update_trade_button_state()
 
+    def _spin_live_value(self, box, fallback: float = 0.01, minimum: float = 0.01) -> float:
+        """Read a QDoubleSpinBox while the user is still typing.
+
+        QDoubleSpinBox.value() may not update until Enter/focus-loss for text like
+        `0.50`. This parser lets the Ratio label and chart plan update instantly.
+        """
+        try:
+            raw = box.lineEdit().text()
+        except Exception:
+            raw = str(getattr(box, "text", lambda: "")())
+        cleaned = ""
+        dot_seen = False
+        for ch in raw:
+            if ch.isdigit():
+                cleaned += ch
+            elif ch == "." and not dot_seen:
+                cleaned += ch
+                dot_seen = True
+        if cleaned in ("", "."):
+            try:
+                val = float(box.value())
+            except Exception:
+                val = fallback
+        else:
+            try:
+                val = float(cleaned)
+            except Exception:
+                val = fallback
+        return max(float(val), float(minimum))
+
+    def _cash_size(self) -> float:
+        return self._spin_live_value(self.size_box, 20.0, 0.01) if hasattr(self, "size_box") else 1.0
+
+    def _cash_stop_loss(self) -> float:
+        return self._spin_live_value(self.stop_box, 0.50, 0.01) if hasattr(self, "stop_box") else 0.01
+
+    def _cash_payout(self) -> float:
+        return self._spin_live_value(self.rr_box, 1.00, 0.01) if hasattr(self, "rr_box") else 0.01
+
+    def on_cash_text_edited(self, _text: str = "") -> None:
+        # Instant UI response while typing in Buy-in / Stop loss / Target payout.
+        self._update_ratio_label()
+        if self._syncing_plan:
+            return
+        self.rebuild_plan_from_inputs()
+
     def _configured_cash_metrics(self) -> dict:
         """Cash-only RR math that always works, even before a chart setup exists."""
-        size = max(float(self.size_box.value()), 0.01) if hasattr(self, "size_box") else 1.0
-        stop_loss = max(float(self.stop_box.value()), 0.01) if hasattr(self, "stop_box") else 0.01
-        payout = max(float(self.rr_box.value()), 0.01) if hasattr(self, "rr_box") else 0.01
+        size = self._cash_size()
+        stop_loss = self._cash_stop_loss()
+        payout = self._cash_payout()
         rr = payout / max(stop_loss, 0.01)
         return {
             "size": size,
@@ -690,13 +740,23 @@ class MainWindow(QMainWindow):
             f"moves {m['stop_pct']:.3f}% / {m['payout_pct']:.3f}%"
         )
 
-    def _update_configured_rr_label(self) -> None:
-        if not hasattr(self, "config_rr_label"):
+    def _update_ratio_label(self, side: str | None = None, entry: float | None = None, stop: float | None = None, target: float | None = None) -> None:
+        if not hasattr(self, "plan_rr_label"):
             return
+        if side and entry and stop and target and entry > 1 and stop > 1 and target > 1:
+            text = self._plan_cash_summary(side, entry, stop, target)
+        else:
+            text = self._configured_cash_summary()
+        self.plan_rr_label.setText(text)
+
+    def _update_configured_rr_label(self) -> None:
+        # Kept for internal calls, but the visible UI now uses only the Ratio row.
         m = self._configured_cash_metrics()
-        self.config_rr_label.setText(
-            f"RR {m['rr']:.2f}:1  |  risk ${m['stop_loss']:.2f} → payout ${m['payout']:.2f}  |  buy-in ${m['size']:.2f}"
-        )
+        if hasattr(self, "config_rr_label"):
+            self.config_rr_label.setText(
+                f"RR {m['rr']:.2f}:1  |  risk ${m['stop_loss']:.2f} → payout ${m['payout']:.2f}  |  buy-in ${m['size']:.2f}"
+            )
+        self._update_ratio_label()
 
     def _cash_metrics_from_prices(self, side: str, entry: float, stop: float, target: float) -> dict:
         """Translate chart price lines into the small-dollar plan the user sees.
@@ -705,7 +765,7 @@ class MainWindow(QMainWindow):
         The chart still needs BTC price levels, so the conversion uses the paper
         account's spot-style P/L formula: price move % * buy-in size.
         """
-        size = max(float(self.size_box.value()), 0.01) if hasattr(self, "size_box") else 1.0
+        size = self._cash_size() if hasattr(self, "size_box") else 1.0
         entry = max(float(entry), 0.01)
         stop = float(stop)
         target = float(target)
@@ -734,9 +794,12 @@ class MainWindow(QMainWindow):
         )
 
     def _update_plan_rr_label(self, side: str, entry: float, stop: float, target: float) -> None:
-        self._update_configured_rr_label()
-        if hasattr(self, "plan_rr_label"):
-            self.plan_rr_label.setText("Plan " + self._plan_cash_summary(side, entry, stop, target))
+        if hasattr(self, "config_rr_label"):
+            m = self._configured_cash_metrics()
+            self.config_rr_label.setText(
+                f"RR {m['rr']:.2f}:1  |  risk ${m['stop_loss']:.2f} → payout ${m['payout']:.2f}  |  buy-in ${m['size']:.2f}"
+            )
+        self._update_ratio_label(side, entry, stop, target)
 
     def _configured_plan_values(self, d):
         """Apply user buy-in/stop/payout controls to the strategy plan.
@@ -749,9 +812,9 @@ class MainWindow(QMainWindow):
             return None
         side = d.plan.side
         entry = float(d.plan.entry)
-        size = max(float(self.size_box.value()), 0.01)
-        stop_loss_usd = max(float(self.stop_box.value()), 0.01)
-        payout_usd = max(float(self.rr_box.value()), 0.01)
+        size = self._cash_size()
+        stop_loss_usd = self._cash_stop_loss()
+        payout_usd = self._cash_payout()
         # Convert desired paper cash risk/reward into BTC price levels.
         # Cap the stop distance so a typo like $500 stop on a $20 buy-in doesn't
         # produce a negative BTC price level.
@@ -773,7 +836,9 @@ class MainWindow(QMainWindow):
         plan = getattr(self.chart, "trade_plan", {}) if hasattr(self, "chart") else {}
         if plan.get("active") and all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
             side = str(plan.get("side", "LONG"))
-            return side, float(plan["entry"]), float(plan["stop"]), float(plan["target"]), float(plan.get("rr") or 0)
+            entry = float(plan["entry"]); stop = float(plan["stop"]); target = float(plan["target"])
+            rr = self._cash_metrics_from_prices(side, entry, stop, target)["rr"]
+            return side, entry, stop, target, rr
         return self._configured_plan_values(d)
 
     def update_active_trade_decision(self, price: float) -> None:
@@ -853,7 +918,7 @@ class MainWindow(QMainWindow):
         if not configured:
             return
         side, entry, stop, target, user_rr = configured
-        visual_sig = f"{gap_key}:{side}:{entry:.2f}:{stop:.2f}:{target:.2f}:{self.size_box.value():.2f}:{self.stop_box.value():.2f}:{self.rr_box.value():.2f}"
+        visual_sig = f"{gap_key}:{side}:{entry:.2f}:{stop:.2f}:{target:.2f}:{self._cash_size():.2f}:{self._cash_stop_loss():.2f}:{self._cash_payout():.2f}"
         self.side_box.setCurrentText(side)
         if visual_sig != self._last_auto_plan_sig:
             self.chart.set_plan(side, entry, stop, target, active=True, mode="plan")
@@ -861,12 +926,12 @@ class MainWindow(QMainWindow):
             self._last_auto_plan_sig = visual_sig
             self._planned_gap_key = gap_key
 
-        log_sig = f"{gap_key}:{side}:{round(stop/25)*25:.0f}:{round(target/25)*25:.0f}:{d.grade}:{d.confidence//5*5}:{self.size_box.value():.2f}:{self.stop_box.value():.2f}:{self.rr_box.value():.2f}"
+        log_sig = f"{gap_key}:{side}:{round(stop/25)*25:.0f}:{round(target/25)*25:.0f}:{d.grade}:{d.confidence//5*5}:{self._cash_size():.2f}:{self._cash_stop_loss():.2f}:{self._cash_payout():.2f}"
         if log_sig != self._last_auto_log_sig:
             self._last_auto_log_sig = log_sig
             self.log_signal(
                 f"AUTO PLAN READY {side} | GAP {gap_key or 'unknown'} | buy-in {entry:,.2f} | stop {stop:,.2f} | "
-                f"target {target:,.2f} | risk ${self.stop_box.value():.2f} | payout ${self.rr_box.value():.2f} | RR {user_rr:.2f}:1 | confidence {d.confidence}% | grade {d.grade}"
+                f"target {target:,.2f} | risk ${self._cash_stop_loss():.2f} | payout ${self._cash_payout():.2f} | RR {user_rr:.2f}:1 | confidence {d.confidence}% | grade {d.grade}"
             )
             self.log_timeline(
                 f"READY {side} | GAP {gap_key or 'unknown'} | Trend {d.trend_15m}/{d.trend_5m} | FVG {d.latest_fvg} | "
@@ -909,7 +974,14 @@ class MainWindow(QMainWindow):
         target = self.target_price_box.value()
         if entry > 1 and stop > 1 and target > 1:
             side = self.side_box.currentText()
-            self.chart.set_plan(side, entry, stop, target, active=True)
+            self.chart.set_plan(side, entry, stop, target, active=True, emit=False)
+            self._syncing_plan = True
+            try:
+                self.entry_price_box.setValue(entry)
+                self.stop_price_box.setValue(stop)
+                self.target_price_box.setValue(target)
+            finally:
+                self._syncing_plan = False
             self._update_plan_rr_label(side, entry, stop, target)
             if self.latest_price is not None:
                 self.update_ai(float(self.latest_price))
@@ -929,16 +1001,23 @@ class MainWindow(QMainWindow):
         if self.candles.candles and self.chart.trade_plan.get("active"):
             side = self.side_box.currentText()
             entry = self.entry_price_box.value() if self.entry_price_box.value() > 1 else self.candles.candles[-1].close
-            size = max(float(self.size_box.value()), 0.01)
-            stop_loss_usd = max(float(self.stop_box.value()), 0.01)
-            payout_usd = max(float(self.rr_box.value()), 0.01)
+            size = self._cash_size()
+            stop_loss_usd = self._cash_stop_loss()
+            payout_usd = self._cash_payout()
             risk = max(entry * min(stop_loss_usd / size, 0.95), 0.01)
             reward = max(entry * max(payout_usd / size, 0.000001), 0.01)
             if side == "LONG":
                 stop = max(0.01, entry - risk); target = entry + reward
             else:
                 stop = entry + risk; target = max(0.01, entry - reward)
-            self.chart.set_plan(side, entry, stop, target, active=True)
+            self.chart.set_plan(side, entry, stop, target, active=True, emit=False)
+            self._syncing_plan = True
+            try:
+                self.entry_price_box.setValue(entry)
+                self.stop_price_box.setValue(stop)
+                self.target_price_box.setValue(target)
+            finally:
+                self._syncing_plan = False
             self._update_plan_rr_label(side, entry, stop, target)
             if self.latest_price is not None:
                 self.update_ai(float(self.latest_price))
@@ -957,15 +1036,15 @@ class MainWindow(QMainWindow):
                 float(plan["entry"]),
                 float(plan["stop"]),
                 float(plan["target"]),
-                self.size_box.value(),
-                f"FVG setup | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | confidence {self.last_decision.confidence}% | risk ${self.stop_box.value():.2f} payout ${self.rr_box.value():.2f} RR {float(plan.get('rr', 0)):.2f}:1",
+                self._cash_size(),
+                f"FVG setup | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | confidence {self.last_decision.confidence}% | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} RR {self._cash_metrics_from_prices(str(plan.get('side', 'LONG')), float(plan['entry']), float(plan['stop']), float(plan['target']))['rr']:.2f}:1",
                 expires_at=self.kalshi_timer.snapshot().close_time.timestamp() if self.kalshi_timer.snapshot().close_time else None
             )
             if self._planned_gap_key:
                 self._used_gap_keys.add(self._planned_gap_key)
             self.chart.set_plan(str(plan.get("side", "LONG")), float(plan["entry"]), float(plan["stop"]), float(plan["target"]), active=True, mode="trade")
             exp = self.kalshi_timer.snapshot().label()
-            self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f} | risk ${self.stop_box.value():.2f} payout ${self.rr_box.value():.2f} | expires BTC15 {exp}")
+            self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f} | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} | expires BTC15 {exp}")
             self.log_timeline(f"OPENED PAPER {plan.get('side')} | entry {float(plan['entry']):,.2f} | expires BTC15 {exp}")
         except Exception as e:
             self.log(str(e))
