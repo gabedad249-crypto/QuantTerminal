@@ -119,8 +119,11 @@ class MainWindow(QMainWindow):
         self.entry_price_box = self._price_spin()
         self.stop_price_box = self._price_spin()
         self.target_price_box = self._price_spin()
-        self.plan_rr_label = QLabel("RR --")
+        self.plan_rr_label = QLabel("Plan RR --")
         self.plan_rr_label.setObjectName("Title")
+        self.config_rr_label = QLabel("Configured RR 2.00:1 | risk $0.50 → payout $1.00")
+        self.config_rr_label.setObjectName("Title")
+        self.config_rr_label.setWordWrap(True)
 
         self._build_ui()
         self.seed_historical_candles()
@@ -135,6 +138,7 @@ class MainWindow(QMainWindow):
         self.target_price_box.valueChanged.connect(self.on_plan_inputs_changed)
         self.mode_box.currentTextChanged.connect(self.on_mode_changed)
         self.auto_paper_toggle.stateChanged.connect(self.on_mode_changed)
+        self._update_configured_rr_label()
 
         self.clock = QTimer(self)
         self.clock.timeout.connect(self.update_timer)
@@ -194,7 +198,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.6.2: cash stop/payout • live RR math • dynamic AI plan"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.6.3: always-visible RR • cash risk/payout • dynamic AI plan"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -216,6 +220,7 @@ class MainWindow(QMainWindow):
         side_help.setObjectName("Muted")
         fl.addRow(side_help)
         fl.addRow("Mode", self.mode_box)
+        fl.addRow("Live RR", self.config_rr_label)
         fl.addRow("Buy-in USD", self.size_box)
         fl.addRow("Stop loss USD", self.stop_box)
         fl.addRow("Target payout USD", self.rr_box)
@@ -447,6 +452,8 @@ class MainWindow(QMainWindow):
         d = self.last_decision or self.setup_engine.evaluate(cs)
         self.last_decision = d
 
+        self._update_configured_rr_label()
+        configured_cash_line = self._configured_cash_summary()
         display_plan = self._current_display_plan(d)
         if d.ready and display_plan:
             side, entry, stop, target, rr = display_plan
@@ -470,7 +477,7 @@ class MainWindow(QMainWindow):
         sim_text = f"{sim['matches']} matches | {sim['win_rate']:.1f}% WR | avg ${sim['avg_pnl']:.2f} | score {sim['score']}/100 | {sim['label']}"
 
         ai_text = (
-            f"FVG Logic Engine v0.6.2\n\n"
+            f"FVG Logic Engine v0.6.3\n\n"
             f"State\n{getattr(d, 'state', 'UNKNOWN')}\n\n"
             f"Decision\n{('READY ' + d.side) if d.ready else 'WAIT'}\n\n"
             f"Grade / Confidence\n{d.grade} / {d.confidence}%\n\n"
@@ -482,6 +489,7 @@ class MainWindow(QMainWindow):
             f"Similarity Memory\n{sim_text}\n\n"
             f"Checklist\n{checklist}\n\n"
             f"Safety Rules\n{safety}\n\n"
+            f"Configured Cash RR\n{configured_cash_line}\n\n"
             f"Auto Plan\n{plan_note}\n\n"
             f"Why Waiting / Why Ready\n{reasons}\n\n"
             f"Hard Rule\nNo buy-in unless the state machine reaches READY: trend + impulse + GAP + pullback + confirmation + RR + safety."
@@ -503,6 +511,8 @@ class MainWindow(QMainWindow):
         breakdown = getattr(d, "confidence_breakdown", []) or ["No score yet"]
         safety = getattr(d, "safety_checks", []) or ["Safety checks pending"]
         sim = self.learning.similarity(d)
+        self._update_configured_rr_label()
+        configured_cash_line = self._configured_cash_summary()
         plan = "No buy-in yet"
         display_plan = self._current_display_plan(d)
         if d.ready and display_plan:
@@ -532,6 +542,7 @@ class MainWindow(QMainWindow):
             "Safety\n" + "\n".join(safety[-10:]) + "\n\n"
             "Memory\n"
             f"{sim['matches']} similar | WR {sim['win_rate']:.1f}% | score {sim['score']}/100 | {sim['label']}\n\n"
+            "Configured Cash RR\n" + configured_cash_line + "\n\n"
             "Why waiting / why ready\n" + "\n".join("• " + r for r in reasons[-8:]) + "\n\n"
             "Trade Plan\n" + plan
         )
@@ -656,6 +667,37 @@ class MainWindow(QMainWindow):
         self.log(f"Mode set: {mode}")
         self.update_trade_button_state()
 
+    def _configured_cash_metrics(self) -> dict:
+        """Cash-only RR math that always works, even before a chart setup exists."""
+        size = max(float(self.size_box.value()), 0.01) if hasattr(self, "size_box") else 1.0
+        stop_loss = max(float(self.stop_box.value()), 0.01) if hasattr(self, "stop_box") else 0.01
+        payout = max(float(self.rr_box.value()), 0.01) if hasattr(self, "rr_box") else 0.01
+        rr = payout / max(stop_loss, 0.01)
+        return {
+            "size": size,
+            "stop_loss": stop_loss,
+            "payout": payout,
+            "rr": rr,
+            "stop_pct": (stop_loss / size * 100.0) if size else 0.0,
+            "payout_pct": (payout / size * 100.0) if size else 0.0,
+        }
+
+    def _configured_cash_summary(self) -> str:
+        m = self._configured_cash_metrics()
+        return (
+            f"RR {m['rr']:.2f}:1 | buy-in ${m['size']:,.2f} | "
+            f"risk ${m['stop_loss']:,.2f} | payout ${m['payout']:,.2f} | "
+            f"moves {m['stop_pct']:.3f}% / {m['payout_pct']:.3f}%"
+        )
+
+    def _update_configured_rr_label(self) -> None:
+        if not hasattr(self, "config_rr_label"):
+            return
+        m = self._configured_cash_metrics()
+        self.config_rr_label.setText(
+            f"RR {m['rr']:.2f}:1  |  risk ${m['stop_loss']:.2f} → payout ${m['payout']:.2f}  |  buy-in ${m['size']:.2f}"
+        )
+
     def _cash_metrics_from_prices(self, side: str, entry: float, stop: float, target: float) -> dict:
         """Translate chart price lines into the small-dollar plan the user sees.
 
@@ -692,8 +734,9 @@ class MainWindow(QMainWindow):
         )
 
     def _update_plan_rr_label(self, side: str, entry: float, stop: float, target: float) -> None:
+        self._update_configured_rr_label()
         if hasattr(self, "plan_rr_label"):
-            self.plan_rr_label.setText(self._plan_cash_summary(side, entry, stop, target))
+            self.plan_rr_label.setText("Plan " + self._plan_cash_summary(side, entry, stop, target))
 
     def _configured_plan_values(self, d):
         """Apply user buy-in/stop/payout controls to the strategy plan.
@@ -854,7 +897,7 @@ class MainWindow(QMainWindow):
                 self._update_plan_rr_label(side, entry, stop, target)
             else:
                 rr = float(plan.get("rr") or 0)
-                self.plan_rr_label.setText(f"RR {rr:.2f}:1")
+                self.plan_rr_label.setText(f"Plan RR {rr:.2f}:1")
         finally:
             self._syncing_plan = False
 
@@ -874,6 +917,7 @@ class MainWindow(QMainWindow):
     def rebuild_plan_from_inputs(self) -> None:
         if self._syncing_plan:
             return
+        self._update_configured_rr_label()
         # If the strategy has a valid setup, changing buy-in/stop/payout instantly updates the planned lines.
         if self.last_decision and self.last_decision.ready and getattr(self.last_decision, "plan", None) and not self.account.open_trade:
             self._last_auto_plan_sig = ""
