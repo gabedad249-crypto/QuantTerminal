@@ -1,4 +1,4 @@
-# Quant Terminal v0.3.2 Alpha
+# Quant Terminal v0.3.3 Alpha
 
 FVG-focused research and paper-trading terminal.
 
@@ -38,3 +38,10 @@ git push
 ## Note
 
 No chart is literally 100% perfect. This terminal uses Coinbase BTC-USD candles for chart logic and attempts to sync the BTC15 countdown to Kalshi market close_time when available.
+
+
+## v0.3.3
+- Stabilized Decision/Thinking tabs so they do not visually rebuild every tick.
+- Cleaner chart defaults: fewer GAP boxes, no swing labels by default, less clutter.
+- Better Kalshi BTC15 matching using KXBTC15M series search first.
+- Throttled chart/text updates while keeping price and paper P/L live.

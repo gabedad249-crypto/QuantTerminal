@@ -1,4 +1,5 @@
 from PySide6.QtCore import QTimer, Signal, QObject, Qt
+import time
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
@@ -40,6 +41,10 @@ class MainWindow(QMainWindow):
         self.latest_price: float | None = None
         self._syncing_plan = False
         self._last_ai_text = ""
+        self._last_thinking_text = ""
+        self._last_ai_update_ts = 0.0
+        self._last_chart_update_ts = 0.0
+        self._last_decision_signature = ""
         self.last_decision = None
         self._learned_closed_trade_ids = set()
 
@@ -152,7 +157,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.2: Kalshi timer • thinking panel • cleaner GAP overlays"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.3: stable thinking panel • cleaner chart • better Kalshi matching"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -220,11 +225,23 @@ class MainWindow(QMainWindow):
         candles = self.candles.update_price(price)
         self.account.update(price)
         self.capture_closed_trades_for_learning()
-        self.chart.set_candles(candles)
+
+        # Heavy visual/text widgets are throttled so the UI does not look like it
+        # is rebuilding every tick. Price/P&L still update instantly.
+        now = time.time()
+        if now - self._last_chart_update_ts >= 0.90:
+            self._last_chart_update_ts = now
+            self.chart.set_candles(candles)
+
         self.last_decision = self.setup_engine.evaluate(candles)
         self.learning.record_snapshot(price, self.last_decision)
         self.apply_valid_setup_to_chart()
-        self.update_ai(price)
+
+        sig = self._decision_signature(self.last_decision)
+        if now - self._last_ai_update_ts >= 1.25 or sig != self._last_decision_signature:
+            self._last_ai_update_ts = now
+            self._last_decision_signature = sig
+            self.update_ai(price)
         self.update_stats()
 
     def update_timer(self) -> None:
@@ -238,6 +255,42 @@ class MainWindow(QMainWindow):
         src = "Kalshi" if snap.source == "KALSHI" else "Est"
         ticker = f" {snap.ticker}" if snap.ticker else ""
         self.timer_label.setText(f"BTC15 {src}: {s//60:02d}:{s%60:02d}{ticker}")
+
+    def _decision_signature(self, d) -> str:
+        if not d:
+            return "none"
+        plan = getattr(d, "plan", None)
+        plan_sig = ""
+        if plan:
+            plan_sig = f"{plan.side}:{plan.entry:.2f}:{plan.stop:.2f}:{plan.target:.2f}"
+        return "|".join([
+            str(getattr(d, "ready", False)),
+            str(getattr(d, "side", "WAIT")),
+            str(getattr(d, "grade", "")),
+            str(getattr(d, "confidence", 0)),
+            str(getattr(d, "latest_fvg", "")),
+            plan_sig,
+            ";".join(getattr(d, "reasons", [])[-3:]),
+        ])
+
+    def _set_text_stable(self, box: QTextEdit, text: str, attr_name: str) -> None:
+        # QTextEdit.setPlainText resets scroll/caret. Only write if content actually
+        # changed, preserve scroll, and do not steal focus from the chart.
+        if getattr(self, attr_name, "") == text:
+            return
+        setattr(self, attr_name, text)
+        bar = box.verticalScrollBar()
+        old = bar.value()
+        at_bottom = old >= max(0, bar.maximum() - 3)
+        box.blockSignals(True)
+        box.setUpdatesEnabled(False)
+        box.setPlainText(text)
+        box.setUpdatesEnabled(True)
+        box.blockSignals(False)
+        if at_bottom:
+            bar.setValue(bar.maximum())
+        else:
+            bar.setValue(min(old, bar.maximum()))
 
     def update_ai(self, price: float) -> None:
         cs = self.candles.candles
@@ -272,12 +325,8 @@ class MainWindow(QMainWindow):
             f"Why Waiting\n{reasons}\n\n"
             f"Rule\nNo suggested trade unless: trend + impulse + FVG + pullback + engulfing/rejection + RR >= 2."
         )
-        if ai_text != self._last_ai_text:
-            self._last_ai_text = ai_text
-            old = self.ai_box.verticalScrollBar().value()
-            self.ai_box.setPlainText(ai_text)
-            self.ai_box.verticalScrollBar().setValue(old)
-            self.update_thinking_panel(d)
+        self._set_text_stable(self.ai_box, ai_text, "_last_ai_text")
+        self.update_thinking_panel(d)
 
     def update_thinking_panel(self, d) -> None:
         snap = self.kalshi_timer.snapshot()
@@ -312,7 +361,7 @@ class MainWindow(QMainWindow):
             "Why waiting / why ready\n" + "\n".join("• " + r for r in reasons[-8:]) + "\n\n"
             "Trade Plan\n" + plan
         )
-        self.thinking_box.setPlainText(text)
+        self._set_text_stable(self.thinking_box, text, "_last_thinking_text")
 
     def clean_chart_view(self) -> None:
         self.chart.max_gap_boxes = 6
@@ -320,7 +369,7 @@ class MainWindow(QMainWindow):
         self.chart.show_gap_labels = True
         self.chart.show_swing_labels = True
         self.chart._redraw()
-        self.log("Clean Chart: showing only recent active/touched GAP boxes and recent H/L labels")
+        self.log("Clean Chart: reduced to the newest active GAP boxes, fewer labels, and major H/L only")
 
     def toggle_filled_gaps(self) -> None:
         self.chart.show_filled_gaps = not self.chart.show_filled_gaps

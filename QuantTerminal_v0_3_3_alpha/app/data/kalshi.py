@@ -101,44 +101,60 @@ class KalshiBTC15Timer:
 
     def _get_json(self, path: str, params: dict) -> dict:
         url = f"{self.BASE}{path}?{urlencode(params)}"
-        req = Request(url, headers={"User-Agent": "QuantTerminal/0.3.2"})
+        req = Request(url, headers={"User-Agent": "QuantTerminal/0.3.3"})
         with urlopen(req, timeout=7) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     def _find_active_btc15_market(self) -> Optional[dict]:
-        # Kalshi tickers/series can change, so don't hardcode only one ticker.
-        # Search open markets and rank the ones that look like BTC 15-minute crypto markets.
+        # Prefer the actual 15-minute Bitcoin series when available. Public docs
+        # recommend using series/event/market fields instead of parsing tickers.
         now = int(time.time())
-        data = self._get_json("/markets", {
-            "status": "open",
-            "limit": 1000,
-            "min_close_ts": now - 60,
-            "max_close_ts": now + 3600,
-        })
-        markets = data.get("markets", []) or []
-        scored: list[tuple[int, dict]] = []
-        for m in markets:
+        searches = [
+            {"status": "open", "series_ticker": "KXBTC15M", "limit": 200},
+            {"status": "open", "event_ticker": "KXBTC15M", "limit": 200},
+            {"status": "open", "limit": 1000, "min_close_ts": now - 60, "max_close_ts": now + 3600},
+        ]
+        all_markets: list[dict] = []
+        for params in searches:
+            try:
+                data = self._get_json("/markets", params)
+                all_markets.extend(data.get("markets", []) or [])
+            except Exception:
+                continue
+
+        # De-dupe by ticker.
+        unique: dict[str, dict] = {}
+        for m in all_markets:
+            unique[str(m.get("ticker", id(m)))] = m
+
+        scored: list[tuple[int, datetime, dict]] = []
+        now_dt = datetime.now(timezone.utc)
+        for m in unique.values():
             hay = " ".join(str(m.get(k, "")) for k in (
                 "ticker", "event_ticker", "series_ticker", "title", "subtitle", "yes_sub_title", "no_sub_title"
             )).upper()
+            close_dt = self._parse_time(m.get("close_time") or m.get("latest_expiration_time"))
+            if not close_dt or close_dt <= now_dt:
+                continue
             score = 0
+            if str(m.get("series_ticker", "")).upper() == "KXBTC15M":
+                score += 20
+            if "KXBTC15M" in hay:
+                score += 15
             if "BTC" in hay or "BITCOIN" in hay:
-                score += 5
+                score += 6
             if "15" in hay or "FIFTEEN" in hay:
-                score += 2
+                score += 4
             if "CRYPTO" in hay:
                 score += 1
-            if "KXBTC" in hay:
-                score += 4
-            close_dt = self._parse_time(m.get("close_time"))
-            if close_dt and close_dt > datetime.now(timezone.utc):
-                score += 2
-            if score >= 6:
-                scored.append((score, m))
+            # Prefer the market closing soonest after now, because that is the
+            # active window the Kalshi UI usually shows.
+            seconds = max(0, int((close_dt - now_dt).total_seconds()))
+            if seconds <= 15 * 60 + 90:
+                score += 6
+            if score >= 10:
+                scored.append((score, close_dt, m))
         if not scored:
             return None
-        scored.sort(key=lambda x: (x[0], x[1].get("close_time", "")), reverse=True)
-        # Prefer the nearest close after now, not some later market.
-        candidates = [m for _, m in scored]
-        candidates.sort(key=lambda m: self._parse_time(m.get("close_time")) or datetime.max.replace(tzinfo=timezone.utc))
-        return candidates[0]
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        return scored[0][2]

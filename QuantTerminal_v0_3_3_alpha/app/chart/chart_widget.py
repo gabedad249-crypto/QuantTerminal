@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QWheelEvent
+import time
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
 
 from app.strategy.fvg_engine import Candle, FVG, FVGEngine
@@ -56,12 +57,13 @@ class ChartWidget(QGraphicsView):
         # Clean-chart defaults. The strategy can still use every FVG internally,
         # but the screen only draws the most relevant recent gaps so it doesn't
         # turn into a wall of BULL/BEAR labels.
-        self.max_gap_boxes = 10
+        self.max_gap_boxes = 5
         self.show_filled_gaps = False
         self.show_gap_labels = True
-        self.show_swing_labels = True
+        self.show_swing_labels = False
 
         self._plot = QRectF(60, 12, 900, 360)
+        self._last_mouse_redraw = 0.0
         self._hi = 1.0
         self._lo = 0.0
 
@@ -251,15 +253,17 @@ class ChartWidget(QGraphicsView):
     def _draw_fvgs(self, candles: list[Candle], global_start: int) -> None:
         count = len(candles)
         step = self._plot.width() / max(1, count)
-        visible_ts = {int(c.ts) for c in candles}
+        visible_start = candles[0].ts
+        visible_end = candles[-1].ts
         drawable = []
         for fvg in self.fvgs:
             if not self.show_filled_gaps and fvg.status == "FILLED":
                 continue
-            # Only show gaps whose creation candles are near/inside the visible range.
-            if not any(int(c.ts) in visible_ts for c in candles if fvg.start_ts <= c.ts <= fvg.end_ts):
+            # Show only gaps whose creation/active zone intersects the visible candles.
+            if fvg.end_ts < visible_start or fvg.start_ts > visible_end:
                 continue
             drawable.append(fvg)
+        # Keep the chart clean: only latest relevant gaps. The strategy still sees all.
         drawable = drawable[-self.max_gap_boxes:]
 
         for fvg in drawable:
@@ -267,14 +271,14 @@ class ChartWidget(QGraphicsView):
             if not indexes:
                 continue
             start_i = max(0, indexes[0])
-            end_i = min(count - 1, start_i + 10)
+            end_i = min(count - 1, start_i + 6)
             x1 = self._x(start_i, count) - step * 0.40
             x2 = self._x(end_i, count) + step * 0.40
             y_top = self._y(fvg.top)
             y_bot = self._y(fvg.bottom)
 
             fill = QColor("#6b7280")
-            fill.setAlpha(22 if fvg.status == "FILLED" else 46)
+            fill.setAlpha(16 if fvg.status == "FILLED" else 34)
             border = QColor("#94a3b8")
             if fvg.status == "TOUCHED":
                 border = QColor("#f59e0b")
@@ -284,17 +288,17 @@ class ChartWidget(QGraphicsView):
 
             if self.show_gap_labels:
                 # Keep the chart clean: show GAP only, not giant bullish/bearish spam.
-                status = "FILLED" if fvg.status == "FILLED" else ("TOUCHED" if fvg.status == "TOUCHED" else "GAP")
-                self._text(x1 + 4, min(y_top, y_bot) + 2, status, "#e5e7eb", 8)
+                status = "GAP" if fvg.status != "FILLED" else "FILLED"
+                self._text(x1 + 4, min(y_top, y_bot) + 2, status, "#cbd5e1", 7)
 
     def _draw_high_low(self, candles: list[Candle]) -> None:
         high_c = max(candles, key=lambda c: c.high)
         low_c = min(candles, key=lambda c: c.low)
-        for price, label, color in [(high_c.high, "Range High", "#f59e0b"), (low_c.low, "Range Low", "#60a5fa")]:
+        for price, label, color in [(high_c.high, "High", "#f59e0b"), (low_c.low, "Low", "#60a5fa")]:
             y = self._y(price)
             pen = QPen(QColor(color), 1, Qt.DashLine)
             self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
-            self._text(self._plot.left() + 8, y - 16, f"{label} {price:,.2f}", color, 9)
+            self._text(self._plot.left() + 8, y - 14, f"{label} {price:,.0f}", color, 8)
 
     def _draw_swings(self, candles: list[Candle]) -> None:
         if not self.show_swing_labels:
@@ -313,7 +317,6 @@ class ChartWidget(QGraphicsView):
         stop = self.trade_plan.get("stop")
         target = self.trade_plan.get("target")
         if not self.trade_plan.get("active") or not all(isinstance(v, (int, float)) for v in (entry, stop, target)):
-            self._text(self._plot.left() + 10, self._plot.top() + 10, "No planned trade • click Suggest Buy-In", "#94a3b8", 10)
             return
         side = str(self.trade_plan.get("side", "LONG"))
         vals = [("target", float(target), "#2563eb", "TARGET"), ("entry", float(entry), "#e5e7eb", "ENTRY"), ("stop", float(stop), "#dc2626", "STOP")]
@@ -402,8 +405,12 @@ class ChartWidget(QGraphicsView):
                 self._redraw()
             event.accept()
             return
-        # Crosshair-only redraw is throttled by Qt; do not touch zoom/offset here.
-        self._redraw()
+        # Crosshair-only redraw: throttle so mouse movement does not make the whole
+        # chart feel like it is rebuilding.
+        now = time.time()
+        if now - self._last_mouse_redraw >= 0.06:
+            self._last_mouse_redraw = now
+            self._redraw()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
