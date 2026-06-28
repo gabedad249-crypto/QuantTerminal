@@ -18,6 +18,7 @@ class PaperTrade:
     exit_reason: str = ""
     opened_at: float = field(default_factory=time.time)
     closed_at: Optional[float] = None
+    expires_at: Optional[float] = None
     trade_id: int = 0
 
     @property
@@ -78,7 +79,7 @@ class PaperAccount:
         t = self.open_trade
         return self.balance + self.reserved + (t.pnl if t else 0.0)
 
-    def open_position(self, side: str, entry: float, stop: float, target: float, size_usd: float, reason: str) -> PaperTrade:
+    def open_position(self, side: str, entry: float, stop: float, target: float, size_usd: float, reason: str, expires_at: Optional[float] = None) -> PaperTrade:
         side = side.upper().strip()
         if side not in ("LONG", "SHORT"):
             raise ValueError("side must be LONG or SHORT")
@@ -98,6 +99,7 @@ class PaperAccount:
             size_usd=size_usd,
             reason=reason,
             open_price=float(entry),
+            expires_at=expires_at,
             trade_id=self.next_trade_id,
         )
         self.next_trade_id += 1
@@ -106,7 +108,7 @@ class PaperAccount:
         self.trades.append(trade)
         return trade
 
-    def update(self, price: float) -> None:
+    def update(self, price: float, force_close: bool = False, force_reason: str = "") -> None:
         trade = self.open_trade
         if not trade:
             return
@@ -119,11 +121,17 @@ class PaperAccount:
             unrealized = (trade.entry - price) / trade.entry * trade.size_usd
             hit_stop = price >= trade.stop
             hit_target = price <= trade.target
+        time_expired = bool(trade.expires_at and time.time() >= float(trade.expires_at))
         trade.pnl = unrealized
-        if hit_stop or hit_target:
+        if force_close or time_expired or hit_stop or hit_target:
             trade.status = "CLOSED"
             trade.exit_price = price
-            trade.exit_reason = "TARGET" if hit_target else "STOP"
+            if force_close:
+                trade.exit_reason = force_reason or "FORCE_CLOSE"
+            elif time_expired:
+                trade.exit_reason = "KALSHI_15M_END"
+            else:
+                trade.exit_reason = "TARGET" if hit_target else "STOP"
             trade.closed_at = time.time()
             # Recalculate final P/L exactly from the actual exit price.
             if trade.side == "LONG":

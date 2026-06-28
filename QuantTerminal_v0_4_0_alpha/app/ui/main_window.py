@@ -53,6 +53,7 @@ class MainWindow(QMainWindow):
         self._last_ready_signal_sig = ""
         self._journal_lines: list[str] = []
         self._auto_opened_signal_sig = ""
+        self._last_self_tune_ts = 0.0
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
@@ -173,7 +174,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.9: Kalshi server-time sync • similarity scoring • safe auto-tune"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.4.0: 15m trade expiry • live P/L chart • self auto-tune"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -274,7 +275,12 @@ class MainWindow(QMainWindow):
         self.feed_label.setObjectName("Green")
         self.price_label.setText(f"Price: ${price:,.2f}")
         candles = self.candles.update_price(price)
-        self.account.update(price)
+        # Paper trades are forced closed at the Kalshi BTC15 close time; no paper trade is allowed to survive past the 15m market.
+        snap_for_trade = self.kalshi_timer.snapshot()
+        expired = bool(snap_for_trade.close_time and snap_for_trade.seconds_left() <= 0)
+        self.account.update(price, force_close=expired, force_reason="KALSHI_15M_END" if expired else "")
+        open_trade = self.account.open_trade
+        self.chart.set_live_price(price, open_trade.pnl if open_trade else 0.0, open_trade.side if open_trade else "")
         self.capture_closed_trades_for_learning()
 
         # Heavy visual/text widgets are throttled so the UI does not look like it
@@ -288,6 +294,7 @@ class MainWindow(QMainWindow):
         self.learning.record_snapshot(price, self.last_decision)
         self.auto_manage_signal_plan()
         self.update_trade_button_state()
+        self.self_auto_tune()
 
         sig = self._decision_signature(self.last_decision)
         if now - self._last_ai_update_ts >= 1.25 or sig != self._last_decision_signature:
@@ -308,6 +315,11 @@ class MainWindow(QMainWindow):
         ticker = f" {snap.ticker}" if snap.ticker else ""
         self.timer_label.setText(f"BTC15 {src}: {s//60:02d}:{s%60:02d}{ticker}")
         self.update_kalshi_debug(snap)
+        # Also close an open paper trade exactly when the BTC15 market ends, even if price is flat.
+        if self.latest_price is not None and self.account.open_trade and snap.close_time and snap.seconds_left() <= 0:
+            self.account.update(float(self.latest_price), force_close=True, force_reason="KALSHI_15M_END")
+            self.capture_closed_trades_for_learning()
+            self.update_stats()
 
     def _decision_signature(self, d) -> str:
         if not d:
@@ -539,10 +551,12 @@ class MainWindow(QMainWindow):
                 float(plan["stop"]),
                 float(plan["target"]),
                 self.size_box.value(),
-                f"FVG setup | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | confidence {self.last_decision.confidence}% | RR {float(plan.get('rr', 0)):.2f}:1"
+                f"FVG setup | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | confidence {self.last_decision.confidence}% | RR {float(plan.get('rr', 0)):.2f}:1",
+                expires_at=self.kalshi_timer.snapshot().close_time.timestamp() if self.kalshi_timer.snapshot().close_time else None
             )
             self.chart.set_plan(str(plan.get("side", "LONG")), float(plan["entry"]), float(plan["stop"]), float(plan["target"]), active=True, mode="trade")
-            self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f}")
+            exp = self.kalshi_timer.snapshot().label()
+            self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f} | expires BTC15 {exp}")
         except Exception as e:
             self.log(str(e))
 
@@ -603,7 +617,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "audit_box"):
             return
         if not self.account.trades:
-            self.audit_box.setPlainText(
+            self._set_text_stable(self.audit_box,
                 "No paper trades yet.\n\n"
                 "Audit rules:\n"
                 "• LONG wins only if price reaches target above entry.\n"
@@ -626,7 +640,7 @@ class MainWindow(QMainWindow):
                 else:
                     formula = f"SHORT P/L = (entry-exit)/entry*size = ({tr.entry:,.2f}-{float(tr.exit_price or 0):,.2f})/{tr.entry:,.2f}*${tr.size_usd:,.0f}"
                 lines.append("   " + formula)
-        self.audit_box.setPlainText("\n".join(lines))
+        self._set_text_stable(self.audit_box, "\n".join(lines), "_last_audit_text")
 
 
     def apply_auto_tune(self) -> None:
@@ -678,6 +692,33 @@ class MainWindow(QMainWindow):
         self.auto_tune_box.setPlainText(msg)
         self.log(f"Auto-tune applied: min RR {current_rr:.2f} -> {new_rr:.2f}")
 
+    def self_auto_tune(self) -> None:
+        """Hands-free conservative auto-tune.
+
+        It only changes the minimum RR after the memory engine has enough closed
+        paper trades. It never invents new logic and never opens a trade by itself
+        unless the Auto-open toggle is ON.
+        """
+        now = time.time()
+        if now - getattr(self, "_last_self_tune_ts", 0.0) < 60:
+            return
+        self._last_self_tune_ts = now
+        current_rr = float(getattr(self.setup_engine, "min_rr", 2.0))
+        try:
+            result = self.learning.auto_tune(current_rr)
+        except Exception:
+            return
+        if not result.get("ready"):
+            return
+        new_rr = float(result.get("recommended_min_rr", current_rr))
+        if abs(new_rr - current_rr) >= 0.05:
+            self.setup_engine.min_rr = new_rr
+            if hasattr(self, "rr_box"):
+                self.rr_box.blockSignals(True)
+                self.rr_box.setValue(new_rr)
+                self.rr_box.blockSignals(False)
+            self.log(f"Self auto-tune adjusted minimum RR {current_rr:.2f} -> {new_rr:.2f}")
+
     def update_memory_stats_panel(self) -> None:
         if not hasattr(self, "memory_stats_box"):
             return
@@ -700,12 +741,12 @@ class MainWindow(QMainWindow):
             f"Worst trade: ${worst:,.2f}\n\n"
             "Next: v0.4.x will use these records for similarity scoring before auto-paper opens."
         )
-        self.memory_stats_box.setPlainText(text)
+        self._set_text_stable(self.memory_stats_box, text, "_last_memory_stats_text")
 
     def run_replay_backtest(self) -> None:
         candles = list(self.candles.candles)
         if len(candles) < 90:
-            self.backtest_box.setPlainText("Need at least 90 one-minute candles before replay backtest can run.")
+            self._set_text_stable(self.backtest_box, "Need at least 90 one-minute candles before replay backtest can run.", "_last_backtest_text")
             return
         wins = losses = trades = 0
         total_pnl = 0.0
@@ -744,7 +785,7 @@ class MainWindow(QMainWindow):
             f"Paper P/L on $1,000 test size: ${total_pnl:,.2f}",
             "",
         ]
-        self.backtest_box.setPlainText("\n".join(summary + lines[-80:]))
+        self._set_text_stable(self.backtest_box, "\n".join(summary + lines[-80:]), "_last_backtest_text")
 
     def export_paper_report(self) -> None:
         from pathlib import Path
@@ -769,7 +810,7 @@ class MainWindow(QMainWindow):
             lines.append(tr.audit_line())
         path.write_text("\n".join(lines), encoding="utf-8")
         self.log(f"Exported paper report: {path}")
-        self.backtest_box.setPlainText(f"Exported report to:\n{path}")
+        self._set_text_stable(self.backtest_box, f"Exported report to:\n{path}", "_last_backtest_text")
 
 
     def log_signal(self, message: str) -> None:
@@ -778,7 +819,7 @@ class MainWindow(QMainWindow):
         self._journal_lines.append(line)
         self._journal_lines = self._journal_lines[-200:]
         if hasattr(self, "signal_box"):
-            self.signal_box.setPlainText("\n".join(reversed(self._journal_lines)) or "No auto signals yet.")
+            self._set_text_stable(self.signal_box, "\n".join(reversed(self._journal_lines)) or "No auto signals yet.", "_last_signal_text")
         self.logger.info("SIGNAL " + message)
 
     def update_kalshi_debug(self, snap) -> None:
@@ -803,7 +844,7 @@ class MainWindow(QMainWindow):
             "• URL_TICKER = exact pasted market URL, only used while still active.\n"
             "• ESTIMATED = quarter-hour fallback only."
         )
-        self.kalshi_debug_box.setPlainText(text)
+        self._set_text_stable(self.kalshi_debug_box, text, "_last_kalshi_debug_text")
 
     def log(self, message: str) -> None:
         self.logger.info(message)

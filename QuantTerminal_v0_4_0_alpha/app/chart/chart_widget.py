@@ -67,11 +67,21 @@ class ChartWidget(QGraphicsView):
         self._last_mouse_redraw = 0.0
         self._hi = 1.0
         self._lo = 0.0
+        self.live_price: float | None = None
+        self.live_pnl: float = 0.0
+        self.live_trade_status: str = ""
 
     # ---------- public API used by MainWindow ----------
     def set_candles(self, candles: list[Candle]) -> None:
         self.candles = candles[-800:]
         self.fvgs = self.engine.detect(self.candles)
+        self._redraw()
+
+    def set_live_price(self, price: float, pnl: float = 0.0, status: str = "") -> None:
+        self.live_price = float(price)
+        self.live_pnl = float(pnl or 0.0)
+        self.live_trade_status = status or ""
+        # Current price/P&L changes need fast redraw, but not a chart reset.
         self._redraw()
 
     def create_default_plan(self, price: float, side: str | None = None, rr: float | None = None, emit: bool = True) -> None:
@@ -228,6 +238,7 @@ class ChartWidget(QGraphicsView):
         self._draw_high_low(candles)
         self._draw_swings(candles)
         self._draw_trade_plan()
+        self._draw_live_price()
         self._draw_crosshair()
         # Do not call fitInView/resetTransform here. Zoom is handled by visible_bars;
         # forcing the view every redraw made the chart feel like it snapped back.
@@ -347,6 +358,22 @@ class ChartWidget(QGraphicsView):
         rr = float(self.trade_plan.get("rr") or 0)
         title = "OPEN PAPER TRADE" if mode == "trade" else "AUTO PLAN"
         self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • RR {rr:.2f}:1", "#d1d5db", 10)
+
+
+    def _draw_live_price(self) -> None:
+        if not isinstance(self.live_price, (int, float)):
+            return
+        price = float(self.live_price)
+        if price < self._lo or price > self._hi:
+            return
+        y = self._y(price)
+        pen = QPen(QColor("#f8fafc"), 1, Qt.DotLine)
+        self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
+        label = f"LIVE {price:,.2f}"
+        if self.live_trade_status:
+            label += f"  {self.live_trade_status} P/L ${self.live_pnl:,.2f}"
+        self.scene.addRect(self._plot.left() + 8, y - 12, min(360, 12 + len(label) * 7), 24, QPen(QColor("#64748b"), 1), QBrush(QColor("#111827")))
+        self._text(self._plot.left() + 14, y - 9, label, "#e5e7eb", 8)
 
     def _draw_crosshair(self) -> None:
         if not self.hover_scene:
