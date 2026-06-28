@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
+import time
 
 
 @dataclass
@@ -15,6 +16,31 @@ class PaperTrade:
     exit_price: Optional[float] = None
     pnl: float = 0.0
     exit_reason: str = ""
+    opened_at: float = field(default_factory=time.time)
+    closed_at: Optional[float] = None
+    trade_id: int = 0
+
+    @property
+    def risk_per_unit(self) -> float:
+        return abs(self.entry - self.stop)
+
+    @property
+    def reward_per_unit(self) -> float:
+        return abs(self.target - self.entry)
+
+    @property
+    def rr(self) -> float:
+        return self.reward_per_unit / self.risk_per_unit if self.risk_per_unit else 0.0
+
+    def audit_line(self) -> str:
+        status = self.status
+        exit_price = self.exit_price if self.exit_price is not None else 0.0
+        outcome = self.exit_reason or "OPEN"
+        return (
+            f"#{self.trade_id:04d} {status} {self.side} | entry {self.entry:,.2f} | "
+            f"stop {self.stop:,.2f} | target {self.target:,.2f} | RR {self.rr:.2f}:1 | "
+            f"exit {exit_price:,.2f} via {outcome} | P/L ${self.pnl:,.2f}"
+        )
 
     def direction_label(self) -> str:
         if self.side == "LONG":
@@ -29,6 +55,7 @@ class PaperAccount:
     closed_pnl: float = 0.0
     reserved: float = 0.0
     trades: List[PaperTrade] = field(default_factory=list)
+    next_trade_id: int = 1
 
     def __init__(self, starting_balance: float = 100000.0) -> None:
         self.starting_balance = float(starting_balance)
@@ -36,6 +63,7 @@ class PaperAccount:
         self.closed_pnl = 0.0
         self.reserved = 0.0
         self.trades = []
+        self.next_trade_id = 1
 
     @property
     def open_trade(self) -> Optional[PaperTrade]:
@@ -70,7 +98,9 @@ class PaperAccount:
             size_usd=size_usd,
             reason=reason,
             open_price=float(entry),
+            trade_id=self.next_trade_id,
         )
+        self.next_trade_id += 1
         self.balance -= size_usd
         self.reserved += size_usd
         self.trades.append(trade)
@@ -94,6 +124,7 @@ class PaperAccount:
             trade.status = "CLOSED"
             trade.exit_price = price
             trade.exit_reason = "TARGET" if hit_target else "STOP"
+            trade.closed_at = time.time()
             # Recalculate final P/L exactly from the actual exit price.
             if trade.side == "LONG":
                 trade.pnl = (price - trade.entry) / trade.entry * trade.size_usd

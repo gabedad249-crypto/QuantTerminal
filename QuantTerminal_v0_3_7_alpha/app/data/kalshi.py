@@ -16,6 +16,8 @@ from typing import Optional
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+_MONTHS = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+
 
 @dataclass
 class KalshiMarketClock:
@@ -74,6 +76,24 @@ class KalshiBTC15Timer:
             # still open and inside the active BTC15 window.
             market = None
             exact = self._get_exact_market(self.target_ticker) if self.target_ticker else None
+            url_close = self._parse_ticker_close_time(self.target_ticker)
+
+            # If the pasted Kalshi URL has an embedded active ticker, trust that
+            # first. This fixes the common phone-vs-PC mismatch where Kalshi UI
+            # is on one exact market but the public market search returns a stale
+            # or different open contract.
+            if url_close and url_close > datetime.now(timezone.utc):
+                with self._lock:
+                    self.clock = KalshiMarketClock(
+                        ticker=self.target_ticker,
+                        title="BTC15 from pasted Kalshi URL",
+                        close_time=url_close,
+                        source="URL_TICKER",
+                        last_error="Using close time parsed directly from pasted Kalshi URL ticker",
+                        updated_at=time.time(),
+                    )
+                return
+
             if exact and self._is_current_btc15_market(exact):
                 market = exact
             if not market:
@@ -113,6 +133,30 @@ class KalshiBTC15Timer:
         last = raw.split("/")[-1]
         # Kalshi URLs look like .../kxbtc15m-26jun280030. API tickers are uppercase.
         return last.upper() if last.upper().startswith("KXBTC15M-") else ""
+
+    def _parse_ticker_close_time(self, ticker: str | None) -> Optional[datetime]:
+        """Parse KXBTC15M-26JUN280030 -> 2026-06-28 00:30 UTC.
+
+        Kalshi BTC15 URLs include the expiration timestamp in the ticker.
+        Parsing it locally gives the terminal the same countdown as the exact
+        market page even when the public search endpoint returns a different
+        active market.
+        """
+        if not ticker or not ticker.upper().startswith("KXBTC15M-"):
+            return None
+        code = ticker.upper().split("KXBTC15M-", 1)[1]
+        # YYMMMDDHHMM, e.g. 26JUN280030
+        try:
+            yy = int(code[0:2])
+            mon = _MONTHS.get(code[2:5])
+            dd = int(code[5:7])
+            hh = int(code[7:9])
+            mm = int(code[9:11])
+            if not mon:
+                return None
+            return datetime(2000 + yy, mon, dd, hh, mm, tzinfo=timezone.utc)
+        except Exception:
+            return None
 
     def set_target_url(self, value: str) -> None:
         with self._lock:

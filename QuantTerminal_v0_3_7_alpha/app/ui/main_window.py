@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self.open_trade_label = QLabel("No open paper trade")
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True)
         self.trades_box = QTextEdit(); self.trades_box.setReadOnly(True)
+        self.audit_box = QTextEdit(); self.audit_box.setReadOnly(True)
         self.learning_box = QTextEdit(); self.learning_box.setReadOnly(True)
         self.signal_box = QTextEdit(); self.signal_box.setReadOnly(True)
         self.kalshi_debug_box = QTextEdit(); self.kalshi_debug_box.setReadOnly(True)
@@ -169,7 +170,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.6: active Kalshi sync • real paper cash accounting • anti-spam signals"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.7: exact URL timer • paper journal/audit • verified TP/SL outcomes"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -208,6 +209,9 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         paper = QWidget(); paper_l = QVBoxLayout(paper)
         paper_l.addWidget(self.stats_label); paper_l.addWidget(self.open_trade_label); paper_l.addWidget(self.trades_box); paper_l.addStretch()
+        audit_tab = QWidget(); audit_l = QVBoxLayout(audit_tab)
+        audit_l.addWidget(QLabel("Paper Journal / Trade Audit — verifies wins by TARGET and losses by STOP"))
+        audit_l.addWidget(self.audit_box)
         logs = QWidget(); logs_l = QVBoxLayout(logs); logs_l.addWidget(self.log_box)
         learning_tab = QWidget(); learning_l = QVBoxLayout(learning_tab)
         learning_l.addWidget(self.learning_toggle)
@@ -221,6 +225,7 @@ class MainWindow(QMainWindow):
         kalshi_l.addWidget(apply_kalshi)
         kalshi_l.addWidget(self.kalshi_debug_box)
         tabs.addTab(paper, "Paper Trading")
+        tabs.addTab(audit_tab, "Paper Journal / Audit")
         tabs.addTab(signal_tab, "Signal Journal")
         tabs.addTab(learning_tab, "Learning")
         tabs.addTab(kalshi_tab, "Kalshi Debug")
@@ -279,7 +284,7 @@ class MainWindow(QMainWindow):
             self.kalshi_timer.refresh_async()
         snap = self.kalshi_timer.snapshot()
         s = snap.seconds_left()
-        src = "Kalshi" if snap.source == "KALSHI" else "Est"
+        src = "Kalshi" if snap.source in ("KALSHI", "URL_TICKER") else "Est"
         ticker = f" {snap.ticker}" if snap.ticker else ""
         self.timer_label.setText(f"BTC15 {src}: {s//60:02d}:{s%60:02d}{ticker}")
         self.update_kalshi_debug(snap)
@@ -561,12 +566,42 @@ class MainWindow(QMainWindow):
             for tr in reversed(closed):
                 result = "WIN" if tr.exit_reason == "TARGET" or tr.pnl > 0 else "LOSS"
                 reason = tr.exit_reason or ("TARGET" if tr.pnl > 0 else "STOP")
-                lines.append(f"{result} {tr.side} via {reason} | size ${tr.size_usd:,.0f} | entry {tr.entry:,.2f} exit {float(tr.exit_price or 0):,.2f} P/L ${tr.pnl:,.2f}")
+                lines.append(f"#{tr.trade_id:04d} {result} {tr.side} via {reason} | size ${tr.size_usd:,.0f} | entry {tr.entry:,.2f} exit {float(tr.exit_price or 0):,.2f} P/L ${tr.pnl:,.2f}")
             self.trades_box.setPlainText("\n".join(lines))
         else:
             self.trades_box.setPlainText("No closed paper trades yet. The account will update automatically after TP/SL is hit.")
+        self.update_audit_panel()
         self.update_learning_panel()
         self.update_trade_button_state()
+
+    def update_audit_panel(self) -> None:
+        if not hasattr(self, "audit_box"):
+            return
+        if not self.account.trades:
+            self.audit_box.setPlainText(
+                "No paper trades yet.\n\n"
+                "Audit rules:\n"
+                "• LONG wins only if price reaches target above entry.\n"
+                "• LONG loses if price reaches stop below entry.\n"
+                "• SHORT wins only if price reaches target below entry.\n"
+                "• SHORT loses if price reaches stop above entry.\n"
+                "• Final P/L is recalculated from actual exit price, not from the label."
+            )
+            return
+        lines = [
+            "Paper Trade Audit",
+            "Wins are counted only when exit_reason = TARGET or P/L > 0. Losses are STOP or P/L <= 0.",
+            ""
+        ]
+        for tr in reversed(self.account.trades[-60:]):
+            lines.append(tr.audit_line())
+            if tr.status == "CLOSED":
+                if tr.side == "LONG":
+                    formula = f"LONG P/L = (exit-entry)/entry*size = ({float(tr.exit_price or 0):,.2f}-{tr.entry:,.2f})/{tr.entry:,.2f}*${tr.size_usd:,.0f}"
+                else:
+                    formula = f"SHORT P/L = (entry-exit)/entry*size = ({tr.entry:,.2f}-{float(tr.exit_price or 0):,.2f})/{tr.entry:,.2f}*${tr.size_usd:,.0f}"
+                lines.append("   " + formula)
+        self.audit_box.setPlainText("\n".join(lines))
 
     def log_signal(self, message: str) -> None:
         from datetime import datetime
@@ -593,7 +628,10 @@ class MainWindow(QMainWindow):
             f"Time left: {snap.seconds_left()//60:02d}:{snap.seconds_left()%60:02d}\n"
             f"Updated: {updated}\n"
             f"Last error: {snap.last_error or 'None'}\n\n"
-            "If source says ESTIMATED, the public Kalshi lookup did not find the same active BTC15 market your app is showing yet."
+            "Timer sources:\n"
+            "• URL_TICKER = parsed from your pasted Kalshi market URL; this should match the exact page countdown.\n"
+            "• KALSHI = from public market close_time.\n"
+            "• ESTIMATED = quarter-hour fallback only."
         )
         self.kalshi_debug_box.setPlainText(text)
 
