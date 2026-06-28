@@ -1,4 +1,4 @@
-# Quant Terminal v0.4.0 Alpha
+# Quant Terminal v0.4.1 Alpha
 
 Major fixes/features:
 - LONG/SHORT engine can auto-plan either direction based on FVG + confirmation logic.
@@ -13,3 +13,10 @@ Notes:
 - SHORT = sell/down idea.
 - Paper trading is simulation only.
 - Kalshi sync still depends on what the public Kalshi endpoints/page expose to your PC.
+
+
+## v0.4.1 hotfix
+- Fixes startup crash from audit panel text updater.
+- Adds Signal Timeline tab for step-by-step setup reasoning.
+- Makes key text panels scroll-safe to reduce snap-back.
+- Keeps v0.4.0 features: BTC15 paper expiry, live P/L chart, self auto-tune.

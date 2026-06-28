@@ -52,6 +52,8 @@ class MainWindow(QMainWindow):
         self._last_signal_ready = False
         self._last_ready_signal_sig = ""
         self._journal_lines: list[str] = []
+        self._timeline_lines: list[str] = []
+        self._last_timeline_state = ""
         self._auto_opened_signal_sig = ""
         self._last_self_tune_ts = 0.0
 
@@ -85,6 +87,7 @@ class MainWindow(QMainWindow):
         self.audit_box = QTextEdit(); self.audit_box.setReadOnly(True)
         self.learning_box = QTextEdit(); self.learning_box.setReadOnly(True)
         self.signal_box = QTextEdit(); self.signal_box.setReadOnly(True)
+        self.timeline_box = QTextEdit(); self.timeline_box.setReadOnly(True)
         self.kalshi_debug_box = QTextEdit(); self.kalshi_debug_box.setReadOnly(True)
         self.backtest_box = QTextEdit(); self.backtest_box.setReadOnly(True)
         self.memory_stats_box = QTextEdit(); self.memory_stats_box.setReadOnly(True)
@@ -174,7 +177,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.4.0: 15m trade expiry • live P/L chart • self auto-tune"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.4.1: stability hotfix • signal timeline • scroll-safe panels"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -236,6 +239,9 @@ class MainWindow(QMainWindow):
         backtest_l.addWidget(export_btn)
         backtest_l.addWidget(self.backtest_box)
         signal_tab = QWidget(); signal_l = QVBoxLayout(signal_tab); signal_l.addWidget(self.signal_box)
+        timeline_tab = QWidget(); timeline_l = QVBoxLayout(timeline_tab)
+        timeline_l.addWidget(QLabel("Signal Timeline — step-by-step reasoning trail for each setup"))
+        timeline_l.addWidget(self.timeline_box)
         kalshi_tab = QWidget(); kalshi_l = QVBoxLayout(kalshi_tab)
         apply_kalshi = QPushButton("Sync this Kalshi URL")
         apply_kalshi.clicked.connect(self.apply_kalshi_url)
@@ -246,6 +252,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(paper, "Paper Trading")
         tabs.addTab(audit_tab, "Paper Journal / Audit")
         tabs.addTab(signal_tab, "Signal Journal")
+        tabs.addTab(timeline_tab, "Signal Timeline")
         tabs.addTab(learning_tab, "Learning")
         tabs.addTab(memory_tab, "Memory Stats")
         tabs.addTab(backtest_tab, "Backtest / Replay")
@@ -338,9 +345,11 @@ class MainWindow(QMainWindow):
             ";".join(getattr(d, "reasons", [])[-3:]),
         ])
 
-    def _set_text_stable(self, box: QTextEdit, text: str, attr_name: str) -> None:
+    def _set_text_stable(self, box: QTextEdit, text: str, attr_name: str | None = None) -> None:
         # QTextEdit.setPlainText resets scroll/caret. Only write if content actually
         # changed, preserve scroll, and do not steal focus from the chart.
+        if attr_name is None:
+            attr_name = f"_stable_text_{id(box)}"
         if getattr(self, attr_name, "") == text:
             return
         setattr(self, attr_name, text)
@@ -481,6 +490,12 @@ class MainWindow(QMainWindow):
         """
         d = self.last_decision
         if not d or not d.ready or not d.plan:
+            if d:
+                state = "WAIT:" + ";".join(getattr(d, "checklist", [])[-4:]) + ";" + ";".join(getattr(d, "reasons", [])[-3:])
+                if state != self._last_timeline_state:
+                    self._last_timeline_state = state
+                    reason = (getattr(d, "reasons", [])[-1] if getattr(d, "reasons", []) else "Building candle context")
+                    self.log_timeline(f"WAIT | {reason}")
             if not self.account.open_trade and self.chart.trade_plan.get("active"):
                 self.chart.clear_plan()
                 self._last_auto_plan_sig = ""
@@ -500,6 +515,10 @@ class MainWindow(QMainWindow):
             self.log_signal(
                 f"AUTO PLAN READY {d.plan.side} | buy-in {d.plan.entry:,.2f} | stop {d.plan.stop:,.2f} | "
                 f"target {d.plan.target:,.2f} | RR {d.plan.rr:.2f}:1 | confidence {d.confidence}% | grade {d.grade}"
+            )
+            self.log_timeline(
+                f"READY {d.plan.side} | Trend {d.trend_15m}/{d.trend_5m} | FVG {d.latest_fvg} | "
+                f"Entry {d.plan.entry:,.2f} Stop {d.plan.stop:,.2f} Target {d.plan.target:,.2f}"
             )
         # Major feature: optional hands-free paper mode. OFF by default.
         if self.auto_paper_toggle.isChecked() and not self.account.open_trade and log_sig != self._auto_opened_signal_sig:
@@ -557,6 +576,7 @@ class MainWindow(QMainWindow):
             self.chart.set_plan(str(plan.get("side", "LONG")), float(plan["entry"]), float(plan["stop"]), float(plan["target"]), active=True, mode="trade")
             exp = self.kalshi_timer.snapshot().label()
             self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f} | expires BTC15 {exp}")
+            self.log_timeline(f"OPENED PAPER {plan.get('side')} | entry {float(plan['entry']):,.2f} | expires BTC15 {exp}")
         except Exception as e:
             self.log(str(e))
 
@@ -574,13 +594,14 @@ class MainWindow(QMainWindow):
                 result = "WIN" if trade.exit_reason == "TARGET" or trade.pnl > 0 else "LOSS"
                 why = trade.exit_reason or ("TARGET" if trade.pnl > 0 else "STOP")
                 self.log_signal(f"CLOSED {result} {trade.side} via {why} | exit {float(trade.exit_price or 0):,.2f} | P/L ${trade.pnl:,.2f}")
+                self.log_timeline(f"CLOSED {result} {trade.side} via {why} | exit {float(trade.exit_price or 0):,.2f} | P/L ${trade.pnl:,.2f}")
                 if not self.account.open_trade:
                     self.chart.clear_plan(emit=False)
                 self.log(f"Learning saved outcome: {trade.side} P/L ${trade.pnl:,.2f}")
 
     def update_learning_panel(self) -> None:
         if hasattr(self, "learning_box"):
-            self.learning_box.setPlainText(self.learning.summary_text(self.last_decision))
+            self._set_text_stable(self.learning_box, self.learning.summary_text(self.last_decision), "_last_learning_text")
 
     def update_stats(self) -> None:
         s = self.account.stats()
@@ -812,6 +833,15 @@ class MainWindow(QMainWindow):
         self.log(f"Exported paper report: {path}")
         self._set_text_stable(self.backtest_box, f"Exported report to:\n{path}", "_last_backtest_text")
 
+
+    def log_timeline(self, message: str) -> None:
+        import time
+        stamp = time.strftime("%H:%M:%S")
+        line = f"{stamp}  {message}"
+        self._timeline_lines.append(line)
+        self._timeline_lines = self._timeline_lines[-250:]
+        if hasattr(self, "timeline_box"):
+            self._set_text_stable(self.timeline_box, "\n".join(reversed(self._timeline_lines)) or "No signal timeline yet.", "_last_timeline_text")
 
     def log_signal(self, message: str) -> None:
         from datetime import datetime
