@@ -243,24 +243,29 @@ class ChartWidget(QGraphicsView):
     def _draw_fvgs(self, candles: list[Candle], global_start: int) -> None:
         count = len(candles)
         step = self._plot.width() / max(1, count)
-        for fvg in self.fvgs[-20:]:
+        for fvg in self.fvgs[-28:]:
             # Find local candle indexes by timestamp.
             indexes = [i for i, c in enumerate(candles) if fvg.start_ts <= c.ts <= fvg.end_ts]
             if not indexes:
                 continue
             start_i = max(0, indexes[0])
-            # Short projection, not huge full-screen boxes.
-            end_i = min(count - 1, start_i + 10)
+            # Keep projection short so GAP boxes don't cover the whole chart.
+            end_i = min(count - 1, start_i + 12)
             x1 = self._x(start_i, count) - step * 0.45
             x2 = self._x(end_i, count) + step * 0.45
             y_top = self._y(fvg.top)
             y_bot = self._y(fvg.bottom)
-            color = QColor("#16a34a" if fvg.direction == "BULLISH" else "#dc2626")
-            color.setAlpha(45)
+
+            fill = QColor("#6b7280")  # neutral grey like requested
+            fill.setAlpha(28 if fvg.status == "FILLED" else 58)
             border = QColor("#22c55e" if fvg.direction == "BULLISH" else "#ef4444")
-            border.setAlpha(135)
-            self.scene.addRect(QRectF(x1, min(y_top, y_bot), x2 - x1, abs(y_bot - y_top)), QPen(border, 1), QBrush(color))
-            self._text(x1 + 4, min(y_top, y_bot) + 2, fvg.direction.replace("ISH", ""), border.name(), 8)
+            border.setAlpha(80 if fvg.status == "FILLED" else 180)
+            pen = QPen(border, 1, Qt.DashLine if fvg.status == "FILLED" else Qt.SolidLine)
+            self.scene.addRect(QRectF(x1, min(y_top, y_bot), x2 - x1, max(3, abs(y_bot - y_top))), pen, QBrush(fill))
+
+            side = "BULL" if fvg.direction == "BULLISH" else "BEAR"
+            label = getattr(fvg, "label", "GAP")
+            self._text(x1 + 4, min(y_top, y_bot) + 2, f"{label} • {side}", "#d1d5db", 8)
 
     def _draw_high_low(self, candles: list[Candle]) -> None:
         high_c = max(candles, key=lambda c: c.high)

@@ -57,7 +57,7 @@ class FVGSetupEngine:
 
         fvgs = self.fvg_engine.detect(candles_1m)
         d.fvg_count = len(fvgs)
-        d.latest_fvg = fvgs[-1].direction if fvgs else "None"
+        d.latest_fvg = (fvgs[-1].direction + " " + fvgs[-1].status) if fvgs else "None"
         if not fvgs:
             d.checklist.append("❌ FVG: none found")
             d.reasons.append("No fair value gap yet")

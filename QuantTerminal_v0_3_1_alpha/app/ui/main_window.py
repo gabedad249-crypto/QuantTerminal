@@ -3,7 +3,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QTabWidget, QPushButton, QListWidget, QTextEdit, QDoubleSpinBox,
-    QComboBox, QFormLayout
+    QComboBox, QFormLayout, QCheckBox
 )
 from app.chart.chart_widget import ChartWidget
 
@@ -20,6 +20,7 @@ from app.data.coinbase import CoinbaseFeed
 from app.data.candles import CandleBuilder, seconds_until_next_15m
 from app.paper.account import PaperAccount
 from app.strategy.setup_engine import FVGSetupEngine
+from app.memory.learning import LearningMemory
 from app.version import APP_NAME, VERSION
 
 
@@ -39,12 +40,15 @@ class MainWindow(QMainWindow):
         self._syncing_plan = False
         self._last_ai_text = ""
         self.last_decision = None
+        self._learned_closed_trade_ids = set()
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
         self.candles = CandleBuilder(60)
         self.account = PaperAccount(settings.get("starting_balance", 100000.0))
         self.setup_engine = FVGSetupEngine(min_rr=float(settings.get("minimum_rr", 2.0)))
+        from pathlib import Path
+        self.learning = LearningMemory(Path("memory"))
         self.feed = CoinbaseFeed(lambda p: self.bus.price.emit(p), settings.get("symbol", "BTC-USD"))
 
         self.price_label = QLabel("Price: --")
@@ -61,6 +65,10 @@ class MainWindow(QMainWindow):
         self.open_trade_label = QLabel("No open paper trade")
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True)
         self.trades_box = QTextEdit(); self.trades_box.setReadOnly(True)
+        self.learning_box = QTextEdit(); self.learning_box.setReadOnly(True)
+        self.learning_toggle = QCheckBox("Learning Mode")
+        self.learning_toggle.setChecked(True)
+        self.learning_toggle.stateChanged.connect(self.on_learning_toggle)
 
         self.side_box = QComboBox(); self.side_box.addItems(["LONG", "SHORT"])
         self.size_box = NoWheelDoubleSpinBox(); self.size_box.setRange(10, 100000); self.size_box.setValue(1000); self.size_box.setPrefix("$")
@@ -132,7 +140,7 @@ class MainWindow(QMainWindow):
         zoom_in = QPushButton("+"); zoom_in.clicked.connect(self.chart.zoom_in)
         reset_view = QPushButton("Fit"); reset_view.clicked.connect(self.chart.reset_view)
         chart_tools.addWidget(QLabel("Zoom")); chart_tools.addWidget(zoom_out); chart_tools.addWidget(zoom_in); chart_tools.addWidget(reset_view)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.0: real FVG checklist • buy-ins only after confirmation"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.1: grey GAP boxes • learning mode • FVG confirmation only"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -165,7 +173,11 @@ class MainWindow(QMainWindow):
         paper = QWidget(); paper_l = QVBoxLayout(paper)
         paper_l.addWidget(self.stats_label); paper_l.addWidget(self.open_trade_label); paper_l.addWidget(self.trades_box); paper_l.addStretch()
         logs = QWidget(); logs_l = QVBoxLayout(logs); logs_l.addWidget(self.log_box)
+        learning_tab = QWidget(); learning_l = QVBoxLayout(learning_tab)
+        learning_l.addWidget(self.learning_toggle)
+        learning_l.addWidget(self.learning_box)
         tabs.addTab(paper, "Paper Trading")
+        tabs.addTab(learning_tab, "Learning")
         tabs.addTab(logs, "Logs")
         root.addWidget(tabs, 0)
         self.setCentralWidget(central)
@@ -192,8 +204,10 @@ class MainWindow(QMainWindow):
         self.price_label.setText(f"Price: ${price:,.2f}")
         candles = self.candles.update_price(price)
         self.account.update(price)
+        self.capture_closed_trades_for_learning()
         self.chart.set_candles(candles)
         self.last_decision = self.setup_engine.evaluate(candles)
+        self.learning.record_snapshot(price, self.last_decision)
         self.apply_valid_setup_to_chart()
         self.update_ai(price)
         self.update_stats()
@@ -317,6 +331,21 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(str(e))
 
+    def on_learning_toggle(self) -> None:
+        self.learning.enabled = self.learning_toggle.isChecked()
+        self.update_learning_panel()
+
+    def capture_closed_trades_for_learning(self) -> None:
+        for trade in self.account.trades:
+            if trade.status == "CLOSED" and id(trade) not in self._learned_closed_trade_ids:
+                self._learned_closed_trade_ids.add(id(trade))
+                self.learning.record_trade_outcome(trade)
+                self.log(f"Learning saved outcome: {trade.side} P/L ${trade.pnl:,.2f}")
+
+    def update_learning_panel(self) -> None:
+        if hasattr(self, "learning_box"):
+            self.learning_box.setPlainText(self.learning.summary_text())
+
     def update_stats(self) -> None:
         s = self.account.stats()
         self.stats_label.setText(
@@ -340,6 +369,7 @@ class MainWindow(QMainWindow):
             self.trades_box.setPlainText("\n".join(lines))
         else:
             self.trades_box.setPlainText("No closed paper trades yet. The account will update automatically after TP/SL is hit.")
+        self.update_learning_panel()
 
     def log(self, message: str) -> None:
         self.logger.info(message)
