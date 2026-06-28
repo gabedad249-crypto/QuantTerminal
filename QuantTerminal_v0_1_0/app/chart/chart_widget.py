@@ -9,7 +9,7 @@ class ChartWidget(QWidget):
         self.setMinimumSize(720, 420)
         self.candles: list[Candle] = []
         self.fvgs: list[FVG] = []
-        self.zoom = 1.0
+        self.zoom = 0.8
         self.offset = 0
         self.engine = FVGEngine()
         self.last_mouse = None
@@ -20,10 +20,25 @@ class ChartWidget(QWidget):
         self.fvgs = self.engine.detect(self.candles)
         self.update()
 
+    def zoom_in(self) -> None:
+        self.zoom = max(0.35, min(4.0, self.zoom * 1.18))
+        self.update()
+
+    def zoom_out(self) -> None:
+        self.zoom = max(0.35, min(4.0, self.zoom / 1.18))
+        self.update()
+
+    def reset_view(self) -> None:
+        self.zoom = 0.8
+        self.offset = 0
+        self.update()
+
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
-        self.zoom = max(0.45, min(3.0, self.zoom + (0.1 if delta > 0 else -0.1)))
-        self.update()
+        if delta > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
 
     def mousePressEvent(self, event):
         self.last_mouse = event.position()
@@ -31,7 +46,9 @@ class ChartWidget(QWidget):
     def mouseMoveEvent(self, event):
         if self.last_mouse and event.buttons() & Qt.LeftButton:
             dx = event.position().x() - self.last_mouse.x()
-            self.offset += int(dx / 10)
+            self.offset += int(dx / 8)
+            if self.candles:
+                self.offset = max(0, min(max(0, len(self.candles) - 20), self.offset))
             self.last_mouse = event.position()
             self.update()
 
@@ -52,8 +69,11 @@ class ChartWidget(QWidget):
             p.drawText(rect, Qt.AlignCenter, "Waiting for live BTC candles...")
             return
 
-        visible_count = max(30, int(90 / self.zoom))
-        candles = self.candles[-visible_count:]
+        visible_count = max(20, min(len(self.candles), int(120 / self.zoom)))
+        end = len(self.candles) - self.offset
+        end = max(visible_count, min(len(self.candles), end))
+        start = max(0, end - visible_count)
+        candles = self.candles[start:end]
         highs = [c.high for c in candles]
         lows = [c.low for c in candles]
         hi, lo = max(highs), min(lows)
@@ -92,4 +112,4 @@ class ChartWidget(QWidget):
         p.setPen(QPen(QColor("#60a5fa"), 1))
         p.drawLine(0, int(y), w, int(y))
         p.setPen(QColor("#d7dde8"))
-        p.drawText(8, 20, f"BTC-USD Coinbase | Last {last.close:,.2f} | Candles {len(self.candles)} | FVGs {len(self.fvgs)}")
+        p.drawText(8, 20, f"BTC-USD Coinbase | Last {last.close:,.2f} | Candles {len(self.candles)} | FVGs {len(self.fvgs)} | Zoom {self.zoom:.2f}x")

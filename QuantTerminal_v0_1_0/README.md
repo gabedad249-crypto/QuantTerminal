@@ -22,3 +22,10 @@ Double-click `run_quant_terminal.bat`.
 - Market structure engine
 - Full paper trade manager
 - FVG confirmation strategy
+
+
+## v0.1.1 Alpha
+- Added chart + / - zoom buttons.
+- Added Fit reset button.
+- Mouse wheel zoom now uses the same chart scaling logic.
+- Drag panning now works against the candle window instead of only moving a hidden offset.
