@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QTabWidget, QPushButton, QListWidget, QTextEdit, QDoubleSpinBox,
-    QComboBox, QFormLayout, QCheckBox, QLineEdit
+    QComboBox, QFormLayout, QCheckBox, QLineEdit, QSplitter
 )
 from app.chart.chart_widget import ChartWidget
 
@@ -103,7 +103,8 @@ class MainWindow(QMainWindow):
         self.learning_toggle.setChecked(True)
         self.learning_toggle.stateChanged.connect(self.on_learning_toggle)
         self.auto_paper_toggle = QCheckBox("Auto-open paper when ready")
-        self.auto_paper_toggle.setChecked(False)
+        self.auto_paper_toggle.setChecked(True)
+        self.mode_box = QComboBox(); self.mode_box.addItems(["Paper Training (auto paper)", "Recommend Only (alerts)"])
         self.kalshi_url_box = QLineEdit(settings.get("kalshi_market_url", "https://kalshi.com/category/crypto/btc?frequency=fifteen_min"))
         self.kalshi_url_box.setPlaceholderText("Paste Kalshi BTC15 market URL")
 
@@ -127,6 +128,8 @@ class MainWindow(QMainWindow):
         self.entry_price_box.valueChanged.connect(self.on_plan_inputs_changed)
         self.stop_price_box.valueChanged.connect(self.on_plan_inputs_changed)
         self.target_price_box.valueChanged.connect(self.on_plan_inputs_changed)
+        self.mode_box.currentTextChanged.connect(self.on_mode_changed)
+        self.auto_paper_toggle.stateChanged.connect(self.on_mode_changed)
 
         self.clock = QTimer(self)
         self.clock.timeout.connect(self.update_timer)
@@ -166,9 +169,10 @@ class MainWindow(QMainWindow):
         top_l.addSpacing(20); top_l.addWidget(self.timer_label); top_l.addSpacing(20); top_l.addWidget(self.move_label); top_l.addSpacing(20); top_l.addWidget(self.feed_label)
         root.addWidget(top)
 
-        mid = QHBoxLayout()
-        left = self._panel("Watchlist"); left.setFixedWidth(190)
-        self.watchlist = QListWidget(); self.watchlist.addItems(["BTC-USD", "BTC Up/Down %", "ETH-USD", "Paper Trading", "Journal", "Signals", "Backtests", "Memory", "Settings"])
+        mid = QSplitter(Qt.Horizontal)
+        mid.setChildrenCollapsible(False)
+        left = self._panel("Watchlist"); left.setMinimumWidth(140); left.setMaximumWidth(360)
+        self.watchlist = QListWidget(); self.watchlist.addItems(["Paper Trading", "Journal", "Signals", "Timeline", "Learning", "Memory", "Backtests", "Kalshi", "Logs", "Settings"])
         self.watchlist.itemClicked.connect(self.on_watchlist_clicked)
         left.layout().addWidget(self.watchlist); mid.addWidget(left)
 
@@ -185,13 +189,13 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.5.0: chart polish • one GAP focus • better paper/autotune"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.5.1: paper training mode • auto UP/DOWN • resizable layout"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
-        mid.addWidget(chart_panel, 1)
+        mid.addWidget(chart_panel)
 
         right = self._panel("AI / Thinking")
-        right.setFixedWidth(400)
+        right.setMinimumWidth(300); right.setMaximumWidth(650)
         decision_tabs = QTabWidget()
         decision_tabs.addTab(self.ai_box, "Decision")
         decision_tabs.addTab(self.thinking_box, "Thinking Checklist")
@@ -199,27 +203,28 @@ class MainWindow(QMainWindow):
 
         planner = QFrame(); planner.setObjectName("Panel")
         fl = QFormLayout(planner)
-        fl.addRow("Side", self.side_box)
-        side_help = QLabel("LONG = buy/up. SHORT = sell/down. The engine can paper-trade both.")
+        direction_label = QLabel("Direction: AUTO from chart (UP/LONG or DOWN/SHORT)")
+        direction_label.setObjectName("Title")
+        fl.addRow(direction_label)
+        side_help = QLabel("UP/LONG = paper buy when chart favors up. DOWN/SHORT = paper sell when chart favors down. On Kalshi this maps to Up/Down style thinking.")
         side_help.setObjectName("Muted")
         fl.addRow(side_help)
-        fl.addRow("Size", self.size_box)
-        fl.addRow("Default stop", self.stop_box)
+        fl.addRow("Mode", self.mode_box)
+        fl.addRow("Buy-in USD", self.size_box)
+        fl.addRow("Stop loss %", self.stop_box)
         fl.addRow("Target RR", self.rr_box)
-        fl.addRow("Entry", self.entry_price_box)
-        fl.addRow("Stop", self.stop_price_box)
-        fl.addRow("Target", self.target_price_box)
+        fl.addRow("Planned buy-in", self.entry_price_box)
+        fl.addRow("Planned stop", self.stop_price_box)
+        fl.addRow("Planned target", self.target_price_box)
         fl.addRow("Ratio", self.plan_rr_label)
-        self.open_btn = QPushButton("Open Auto Plan Paper Trade")
-        self.open_btn.clicked.connect(self.open_planned_trade)
-        fl.addRow(self.open_btn)
         fl.addRow("Auto paper", self.auto_paper_toggle)
-        note = QLabel("Auto plan appears only after FVG + pullback + confirmation")
+        note = QLabel("Training mode auto-opens paper trades only after FVG + pullback + confirmation. Recommend mode only tells you what to do.")
         note.setObjectName("Muted")
         fl.addRow(note)
         right.layout().addWidget(planner)
         mid.addWidget(right)
-        root.addLayout(mid, 1)
+        mid.setSizes([180, 900, 420])
+        root.addWidget(mid, 1)
 
         self.tabs = QTabWidget()
         tabs = self.tabs
@@ -307,6 +312,15 @@ class MainWindow(QMainWindow):
             self._last_chart_update_ts = now
             self.chart.set_candles(candles)
 
+        if self.account.open_trade:
+            # During an active paper trade, stop hunting for new trades. Watch and manage the current one.
+            if now - self._last_ai_update_ts >= 0.75:
+                self._last_ai_update_ts = now
+                self.update_active_trade_decision(price)
+            self.update_stats()
+            self.self_auto_tune()
+            return
+
         self.last_decision = self.setup_engine.evaluate(candles)
         self.learning.record_snapshot(price, self.last_decision)
         self.auto_manage_signal_plan()
@@ -345,17 +359,16 @@ class MainWindow(QMainWindow):
             "Paper Trading": 0,
             "Journal": 1,
             "Signals": 2,
-            "Backtests": 6,
+            "Timeline": 3,
+            "Learning": 4,
             "Memory": 5,
+            "Backtests": 6,
+            "Kalshi": 7,
+            "Logs": 8,
             "Settings": 7,
-            "BTC Up/Down %": 7,
         }
         if hasattr(self, "tabs") and name in mapping:
             self.tabs.setCurrentIndex(mapping[name])
-        if name == "BTC Up/Down %":
-            self.log("BTC Up/Down % watches the underlying BTC move since the current 15-minute window opened.")
-        elif name == "ETH-USD":
-            self.log("ETH watchlist row is a placeholder for a future multi-market release. Current strategy remains BTC only.")
 
     def update_timer(self) -> None:
         import time
@@ -414,6 +427,9 @@ class MainWindow(QMainWindow):
             bar.setValue(min(old, bar.maximum()))
 
     def update_ai(self, price: float) -> None:
+        if self.account.open_trade:
+            self.update_active_trade_decision(price)
+            return
         cs = self.candles.candles
         d = self.last_decision or self.setup_engine.evaluate(cs)
         self.last_decision = d
@@ -527,6 +543,74 @@ class MainWindow(QMainWindow):
         self.kalshi_timer.set_target_url(url)
         self.log(f"Kalshi target URL set: {url}")
 
+
+    def on_mode_changed(self) -> None:
+        """Keep training/recommend mode obvious and deterministic."""
+        mode = self.mode_box.currentText() if hasattr(self, "mode_box") else "Paper Training (auto paper)"
+        training = mode.startswith("Paper Training")
+        if hasattr(self, "auto_paper_toggle"):
+            self.auto_paper_toggle.blockSignals(True)
+            self.auto_paper_toggle.setChecked(training)
+            self.auto_paper_toggle.setEnabled(training)
+            self.auto_paper_toggle.blockSignals(False)
+        self.log(f"Mode set: {mode}")
+        self.update_trade_button_state()
+
+    def _configured_plan_values(self, d):
+        """Apply user buy-in/stop/target controls to the strategy plan.
+
+        The strategy decides WHEN and DIRECTION. The controls decide HOW MUCH,
+        stop distance, and reward target.
+        """
+        if not d or not getattr(d, "plan", None):
+            return None
+        side = d.plan.side
+        entry = float(d.plan.entry)
+        stop_pct = max(float(self.stop_box.value()), 0.01) / 100.0
+        rr = max(float(self.rr_box.value()), 0.25)
+        risk = max(entry * stop_pct, 1.0)
+        if side == "LONG":
+            stop = entry - risk
+            target = entry + risk * rr
+        else:
+            stop = entry + risk
+            target = entry - risk * rr
+        return side, entry, stop, target, rr
+
+    def update_active_trade_decision(self, price: float) -> None:
+        t = self.account.open_trade
+        if not t:
+            return
+        snap = self.kalshi_timer.snapshot()
+        if t.side == "LONG":
+            dist_target = max(0.0, t.target - price)
+            dist_stop = max(0.0, price - t.stop)
+            direction = "UP / LONG"
+        else:
+            dist_target = max(0.0, price - t.target)
+            dist_stop = max(0.0, t.stop - price)
+            direction = "DOWN / SHORT"
+        text = (
+            "ACTIVE PAPER TRADE — WATCHING\n\n"
+            "The bot is NOT hunting for a new setup while this trade is open.\n\n"
+            f"Direction: {direction}\n"
+            f"Buy-in size: ${t.size_usd:,.2f}\n"
+            f"Entry:  {t.entry:,.2f}\n"
+            f"Now:    {price:,.2f}\n"
+            f"Stop:   {t.stop:,.2f}\n"
+            f"Target: {t.target:,.2f}\n"
+            f"Live P/L: ${t.pnl:,.2f}\n"
+            f"BTC15 expires: {snap.label()}\n\n"
+            f"Distance to target: {dist_target:,.2f}\n"
+            f"Distance to stop:   {dist_stop:,.2f}\n\n"
+            "Exit rules:\n"
+            "• Target hit = win.\n"
+            "• Stop hit = loss.\n"
+            "• BTC15 timer ends = close trade at current price."
+        )
+        self._set_text_stable(self.ai_box, text, "_last_ai_text")
+        self._set_text_stable(self.thinking_box, text, "_last_thinking_text")
+
     def auto_manage_signal_plan(self) -> None:
         """Create/clear the chart plan from the strategy only.
 
@@ -535,6 +619,8 @@ class MainWindow(QMainWindow):
         is cleared. When the setup becomes valid, a BUY-IN/STOP/TARGET plan is
         displayed automatically.
         """
+        if self.account.open_trade:
+            return
         d = self.last_decision
         gap_key = getattr(d, "active_fvg_key", "") if d else ""
         if gap_key and hasattr(self.chart, "set_focus_gap_key"):
@@ -561,25 +647,30 @@ class MainWindow(QMainWindow):
             self.log_timeline(f"SKIP | GAP already used {gap_key}")
             return
 
-        visual_sig = f"{gap_key}:{d.plan.side}:{d.plan.entry:.0f}:{d.plan.stop:.0f}:{d.plan.target:.0f}"
-        self.side_box.setCurrentText(d.plan.side)
+        configured = self._configured_plan_values(d)
+        if not configured:
+            return
+        side, entry, stop, target, user_rr = configured
+        visual_sig = f"{gap_key}:{side}:{entry:.0f}:{stop:.0f}:{target:.0f}:{self.size_box.value():.0f}"
+        self.side_box.setCurrentText(side)
         if visual_sig != self._last_auto_plan_sig:
-            self.chart.set_plan(d.plan.side, d.plan.entry, d.plan.stop, d.plan.target, active=True, mode="plan")
+            self.chart.set_plan(side, entry, stop, target, active=True, mode="plan")
             self._last_auto_plan_sig = visual_sig
             self._planned_gap_key = gap_key
 
-        log_sig = f"{gap_key}:{d.plan.side}:{round(d.plan.stop/25)*25:.0f}:{round(d.plan.target/25)*25:.0f}:{d.grade}:{d.confidence//5*5}"
+        log_sig = f"{gap_key}:{side}:{round(stop/25)*25:.0f}:{round(target/25)*25:.0f}:{d.grade}:{d.confidence//5*5}:{self.size_box.value():.0f}"
         if log_sig != self._last_auto_log_sig:
             self._last_auto_log_sig = log_sig
             self.log_signal(
-                f"AUTO PLAN READY {d.plan.side} | GAP {gap_key or 'unknown'} | buy-in {d.plan.entry:,.2f} | stop {d.plan.stop:,.2f} | "
-                f"target {d.plan.target:,.2f} | RR {d.plan.rr:.2f}:1 | confidence {d.confidence}% | grade {d.grade}"
+                f"AUTO PLAN READY {side} | GAP {gap_key or 'unknown'} | buy-in {entry:,.2f} | stop {stop:,.2f} | "
+                f"target {target:,.2f} | RR {user_rr:.2f}:1 | confidence {d.confidence}% | grade {d.grade}"
             )
             self.log_timeline(
-                f"READY {d.plan.side} | GAP {gap_key or 'unknown'} | Trend {d.trend_15m}/{d.trend_5m} | FVG {d.latest_fvg} | "
-                f"Entry {d.plan.entry:,.2f} Stop {d.plan.stop:,.2f} Target {d.plan.target:,.2f}"
+                f"READY {side} | GAP {gap_key or 'unknown'} | Trend {d.trend_15m}/{d.trend_5m} | FVG {d.latest_fvg} | "
+                f"Buy-in {entry:,.2f} Stop {stop:,.2f} Target {target:,.2f}"
             )
-        if self.auto_paper_toggle.isChecked() and not self.account.open_trade and log_sig != self._auto_opened_signal_sig:
+        training_mode = hasattr(self, "mode_box") and self.mode_box.currentText().startswith("Paper Training")
+        if training_mode and self.auto_paper_toggle.isChecked() and not self.account.open_trade and log_sig != self._auto_opened_signal_sig:
             self._auto_opened_signal_sig = log_sig
             self.open_planned_trade()
 
@@ -608,6 +699,11 @@ class MainWindow(QMainWindow):
 
     def rebuild_plan_from_inputs(self) -> None:
         if self._syncing_plan:
+            return
+        # If the strategy has a valid setup, changing stop/RR/buy-in instantly updates the planned lines.
+        if self.last_decision and self.last_decision.ready and getattr(self.last_decision, "plan", None) and not self.account.open_trade:
+            self._last_auto_plan_sig = ""
+            self.auto_manage_signal_plan()
             return
         if self.candles.candles and self.chart.trade_plan.get("active"):
             self.chart.create_default_plan(self.entry_price_box.value() if self.entry_price_box.value() > 1 else self.candles.candles[-1].close,
@@ -698,14 +794,16 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "audit_box"):
             return
         if not self.account.trades:
-            self._set_text_stable(self.audit_box,
+            self._set_text_stable(
+                self.audit_box,
                 "No paper trades yet.\n\n"
                 "Audit rules:\n"
                 "• LONG wins only if price reaches target above entry.\n"
                 "• LONG loses if price reaches stop below entry.\n"
                 "• SHORT wins only if price reaches target below entry.\n"
                 "• SHORT loses if price reaches stop above entry.\n"
-                "• Final P/L is recalculated from actual exit price, not from the label."
+                "• Final P/L is recalculated from actual exit price, not from the label.",
+                "_last_audit_text"
             )
             return
         lines = [
