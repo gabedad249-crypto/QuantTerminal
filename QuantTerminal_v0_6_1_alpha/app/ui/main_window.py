@@ -113,7 +113,8 @@ class MainWindow(QMainWindow):
         self.side_box = QComboBox(); self.side_box.addItems(["LONG", "SHORT"])
         self.size_box = NoWheelDoubleSpinBox(); self.size_box.setRange(10, 100000); self.size_box.setValue(1000); self.size_box.setPrefix("$")
         self.stop_box = NoWheelDoubleSpinBox(); self.stop_box.setRange(0.01, 10); self.stop_box.setValue(0.10); self.stop_box.setSuffix("% default stop")
-        self.rr_box = NoWheelDoubleSpinBox(); self.rr_box.setRange(0.5, 10); self.rr_box.setValue(2.0); self.rr_box.setSuffix("R")
+        self.rr_box = NoWheelDoubleSpinBox(); self.rr_box.setRange(0.5, 10); self.rr_box.setValue(2.0); self.rr_box.setSuffix("R target")
+        self.min_rr_box = NoWheelDoubleSpinBox(); self.min_rr_box.setRange(0.5, 10); self.min_rr_box.setValue(float(self.setup_engine.min_rr)); self.min_rr_box.setSuffix("R filter")
 
         self.entry_price_box = self._price_spin()
         self.stop_price_box = self._price_spin()
@@ -126,6 +127,7 @@ class MainWindow(QMainWindow):
 
         self.side_box.currentTextChanged.connect(self.rebuild_plan_from_inputs)
         self.rr_box.valueChanged.connect(self.rebuild_plan_from_inputs)
+        self.min_rr_box.valueChanged.connect(self.on_min_rr_changed)
         self.stop_box.valueChanged.connect(self.rebuild_plan_from_inputs)
         self.entry_price_box.valueChanged.connect(self.on_plan_inputs_changed)
         self.stop_price_box.valueChanged.connect(self.on_plan_inputs_changed)
@@ -191,7 +193,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.6.0: logic engine • state machine • confidence breakdown • setup clusters"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.6.1: decoupled target RR • min RR filter • safer auto-tune"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -216,12 +218,13 @@ class MainWindow(QMainWindow):
         fl.addRow("Buy-in USD", self.size_box)
         fl.addRow("Stop loss %", self.stop_box)
         fl.addRow("Target RR", self.rr_box)
+        fl.addRow("Min setup RR filter", self.min_rr_box)
         fl.addRow("Planned buy-in", self.entry_price_box)
         fl.addRow("Planned stop", self.stop_price_box)
         fl.addRow("Planned target", self.target_price_box)
         fl.addRow("Ratio", self.plan_rr_label)
         fl.addRow("Auto paper", self.auto_paper_toggle)
-        note = QLabel("Training mode auto-opens paper trades only after FVG + pullback + confirmation. Recommend mode only tells you what to do.")
+        note = QLabel("Training mode auto-opens paper trades only after FVG + pullback + confirmation. Target RR changes your stop/target plan. Min setup RR is the filter auto-tune adjusts.")
         note.setObjectName("Muted")
         fl.addRow(note)
         right.layout().addWidget(planner)
@@ -619,6 +622,22 @@ class MainWindow(QMainWindow):
         self.log(f"Kalshi target URL set: {url}")
 
 
+    def on_min_rr_changed(self) -> None:
+        """User/auto-tune control for the strategy minimum RR filter.
+
+        This is intentionally separate from Target RR. Target RR controls the
+        visible paper plan target. Min setup RR controls whether the setup is
+        good enough for the bot to consider.
+        """
+        if self._syncing_plan:
+            return
+        self.setup_engine.min_rr = float(self.min_rr_box.value())
+        self.log(f"Minimum setup RR filter set to {self.setup_engine.min_rr:.2f}:1")
+        if self.last_decision and not self.account.open_trade:
+            self._last_auto_plan_sig = ""
+            self._last_auto_log_sig = ""
+
+
     def on_mode_changed(self) -> None:
         """Keep training/recommend mode obvious and deterministic."""
         mode = self.mode_box.currentText() if hasattr(self, "mode_box") else "Paper Training (auto paper)"
@@ -906,7 +925,7 @@ class MainWindow(QMainWindow):
         memory engine has enough closed paper trades. It does not change the
         strategy or force trades.
         """
-        current_rr = float(getattr(self.setup_engine, "min_rr", 2.0))
+        current_rr = float(self.min_rr_box.value()) if hasattr(self, "min_rr_box") else float(getattr(self.setup_engine, "min_rr", 2.0))
         try:
             result = self.learning.auto_tune(current_rr)
         except Exception as exc:
@@ -929,11 +948,11 @@ class MainWindow(QMainWindow):
 
         new_rr = float(result.get("recommended_min_rr", current_rr))
         self.setup_engine.min_rr = new_rr
-        # Keep visible RR control in sync without triggering noisy rebuilds.
-        if hasattr(self, "rr_box"):
-            self.rr_box.blockSignals(True)
-            self.rr_box.setValue(new_rr)
-            self.rr_box.blockSignals(False)
+        # Keep visible minimum RR filter in sync without changing the user's Target RR.
+        if hasattr(self, "min_rr_box"):
+            self.min_rr_box.blockSignals(True)
+            self.min_rr_box.setValue(new_rr)
+            self.min_rr_box.blockSignals(False)
 
         msg = (
             "Safe Auto-Tune\n\n"
@@ -959,7 +978,7 @@ class MainWindow(QMainWindow):
         if now - getattr(self, "_last_self_tune_ts", 0.0) < 60:
             return
         self._last_self_tune_ts = now
-        current_rr = float(getattr(self.setup_engine, "min_rr", 2.0))
+        current_rr = float(self.min_rr_box.value()) if hasattr(self, "min_rr_box") else float(getattr(self.setup_engine, "min_rr", 2.0))
         try:
             result = self.learning.auto_tune(current_rr)
         except Exception:
@@ -969,10 +988,10 @@ class MainWindow(QMainWindow):
         new_rr = float(result.get("recommended_min_rr", current_rr))
         if abs(new_rr - current_rr) >= 0.05:
             self.setup_engine.min_rr = new_rr
-            if hasattr(self, "rr_box"):
-                self.rr_box.blockSignals(True)
-                self.rr_box.setValue(new_rr)
-                self.rr_box.blockSignals(False)
+            if hasattr(self, "min_rr_box"):
+                self.min_rr_box.blockSignals(True)
+                self.min_rr_box.setValue(new_rr)
+                self.min_rr_box.blockSignals(False)
             self.log(f"Self auto-tune adjusted minimum RR {current_rr:.2f} -> {new_rr:.2f}")
 
     def update_memory_stats_panel(self) -> None:

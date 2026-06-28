@@ -1,8 +1,8 @@
-# Quant Terminal v0.6.0 Alpha
+# Quant Terminal v0.6.1 Alpha
 
 FVG-focused paper-training and recommendation terminal.
 
-## What changed in v0.6.0
+## What changed in v0.6.1
 
 - Added a real **state machine** for the FVG method:
   `BUILDING_CONTEXT -> WAIT_TREND -> WAIT_FVG -> WAIT_PULLBACK -> WAIT_CONFIRMATION -> WAIT_RR -> READY`.
@@ -39,3 +39,11 @@ git add .
 git commit -m "Add state machine logic coach and setup clustering"
 git push
 ```
+
+
+## v0.6.1 hotfix
+
+- Target RR is now yours to change.
+- Auto-tune no longer overwrites Target RR.
+- New Min setup RR filter is separate and used by the strategy/auto-tune.
+- Target RR dynamically updates stop/target plan before a trade opens.
