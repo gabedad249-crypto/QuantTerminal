@@ -10,8 +10,10 @@ from app.data.candles import CandleBuilder, seconds_until_next_15m
 from app.paper.account import PaperAccount
 from app.version import APP_NAME, VERSION
 
+
 class PriceBus(QObject):
     price = Signal(float)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, settings: dict, logger) -> None:
@@ -19,10 +21,10 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.logger = logger
         self.setWindowTitle(f"{APP_NAME} {VERSION}")
-        self.resize(1450, 850)
+        self.resize(1500, 880)
 
         self.latest_price: float | None = None
-        self.last_chart_candle_count = 0
+        self._syncing_plan = False
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
@@ -37,6 +39,7 @@ class MainWindow(QMainWindow):
         self.feed_label = QLabel("● CONNECTING")
         self.feed_label.setObjectName("Muted")
         self.chart = ChartWidget()
+        self.chart.planChanged.connect(self.on_chart_plan_changed)
         self.ai_box = QTextEdit(); self.ai_box.setReadOnly(True)
         self.ai_box.setText("AI Engine\n\nWaiting for live candles...\n\nFVG confirmation strategy will plug in here.")
         self.stats_label = QLabel()
@@ -45,10 +48,23 @@ class MainWindow(QMainWindow):
 
         self.side_box = QComboBox(); self.side_box.addItems(["LONG", "SHORT"])
         self.size_box = QDoubleSpinBox(); self.size_box.setRange(10, 100000); self.size_box.setValue(1000); self.size_box.setPrefix("$")
-        self.stop_box = QDoubleSpinBox(); self.stop_box.setRange(0.01, 10); self.stop_box.setValue(0.10); self.stop_box.setSuffix("% stop")
+        self.stop_box = QDoubleSpinBox(); self.stop_box.setRange(0.01, 10); self.stop_box.setValue(0.10); self.stop_box.setSuffix("% default stop")
         self.rr_box = QDoubleSpinBox(); self.rr_box.setRange(0.5, 10); self.rr_box.setValue(2.0); self.rr_box.setSuffix("R")
 
+        self.entry_price_box = self._price_spin()
+        self.stop_price_box = self._price_spin()
+        self.target_price_box = self._price_spin()
+        self.plan_rr_label = QLabel("RR --")
+        self.plan_rr_label.setObjectName("Title")
+
         self._build_ui()
+
+        self.side_box.currentTextChanged.connect(self.rebuild_plan_from_inputs)
+        self.rr_box.valueChanged.connect(self.rebuild_plan_from_inputs)
+        self.stop_box.valueChanged.connect(self.rebuild_plan_from_inputs)
+        self.entry_price_box.valueChanged.connect(self.on_plan_inputs_changed)
+        self.stop_price_box.valueChanged.connect(self.on_plan_inputs_changed)
+        self.target_price_box.valueChanged.connect(self.on_plan_inputs_changed)
 
         self.clock = QTimer(self)
         self.clock.timeout.connect(self.update_timer)
@@ -56,11 +72,19 @@ class MainWindow(QMainWindow):
 
         self.tick_timer = QTimer(self)
         self.tick_timer.timeout.connect(self.process_latest_price)
-        self.tick_timer.start(250)  # prevents chart redraw spam on every websocket tick
+        self.tick_timer.start(300)  # modest throttle while the placeholder canvas exists
 
         self.update_stats()
         self.feed.start()
         self.logger.info("Quant Terminal started")
+
+    def _price_spin(self) -> QDoubleSpinBox:
+        box = QDoubleSpinBox()
+        box.setRange(1, 10000000)
+        box.setDecimals(2)
+        box.setSingleStep(10)
+        box.setPrefix("$")
+        return box
 
     def _panel(self, title: str) -> QFrame:
         frame = QFrame(); frame.setObjectName("Panel")
@@ -90,22 +114,33 @@ class MainWindow(QMainWindow):
         zoom_out = QPushButton("−"); zoom_out.clicked.connect(self.chart.zoom_out)
         zoom_in = QPushButton("+"); zoom_in.clicked.connect(self.chart.zoom_in)
         reset_view = QPushButton("Fit"); reset_view.clicked.connect(self.chart.reset_view)
-        chart_tools.addWidget(QLabel("Chart scale")); chart_tools.addWidget(zoom_out); chart_tools.addWidget(zoom_in); chart_tools.addWidget(reset_view)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.1.2: placeholder chart, feature build next"))
+        chart_tools.addWidget(QLabel("Zoom")); chart_tools.addWidget(zoom_out); chart_tools.addWidget(zoom_in); chart_tools.addWidget(reset_view)
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.1.3: draggable trade planner; pro chart replacement still coming"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
 
         right = self._panel("AI Decision")
-        right.setFixedWidth(330)
+        right.setFixedWidth(370)
         right.layout().addWidget(self.ai_box)
-        trade_form = QFrame(); trade_form.setObjectName("Panel")
-        fl = QFormLayout(trade_form)
-        fl.addRow("Side", self.side_box); fl.addRow("Size", self.size_box); fl.addRow("Stop", self.stop_box); fl.addRow("Target RR", self.rr_box)
-        open_btn = QPushButton("Open Manual Paper Trade")
-        open_btn.clicked.connect(self.open_manual_trade)
+
+        planner = QFrame(); planner.setObjectName("Panel")
+        fl = QFormLayout(planner)
+        fl.addRow("Side", self.side_box)
+        fl.addRow("Size", self.size_box)
+        fl.addRow("Default stop", self.stop_box)
+        fl.addRow("Target RR", self.rr_box)
+        fl.addRow("Entry", self.entry_price_box)
+        fl.addRow("Stop", self.stop_price_box)
+        fl.addRow("Target", self.target_price_box)
+        fl.addRow("Ratio", self.plan_rr_label)
+        use_ai_btn = QPushButton("Suggest Buy-In From Chart")
+        use_ai_btn.clicked.connect(self.suggest_plan)
+        open_btn = QPushButton("Open Planned Paper Trade")
+        open_btn.clicked.connect(self.open_planned_trade)
+        fl.addRow(use_ai_btn)
         fl.addRow(open_btn)
-        right.layout().addWidget(trade_form)
+        right.layout().addWidget(planner)
         mid.addWidget(right)
         root.addLayout(mid, 1)
 
@@ -130,8 +165,9 @@ class MainWindow(QMainWindow):
         self.price_label.setText(f"Price: ${price:,.2f}")
         candles = self.candles.update_price(price)
         self.account.update(price)
-        # redraw max 4x/sec instead of on every websocket tick
         self.chart.set_candles(candles)
+        if self.entry_price_box.value() <= 1 and candles:
+            self.suggest_plan()
         self.update_ai(price)
         self.update_stats()
 
@@ -144,34 +180,79 @@ class MainWindow(QMainWindow):
         last_fvg = self.chart.fvgs[-1].direction if self.chart.fvgs else "None"
         cs = self.candles.candles
         trend = "Building..."
+        plan_note = "Waiting for candles"
         if len(cs) >= 15:
             trend = "Bullish" if cs[-1].close > cs[-15].close else "Bearish"
+        if cs:
+            p = self.chart.trade_plan
+            side = p.get("side", "LONG")
+            rr = p.get("rr", 0)
+            entry = p.get("entry")
+            plan_note = f"Suggested {side} buy-in near {entry:,.2f} | RR {rr:.2f}:1" if isinstance(entry, (int, float)) else "No plan yet"
         self.ai_box.setText(
+            f"FVG Method Coach\n\n"
             f"Market Bias\n{trend}\n\n"
             f"Active FVGs\n{fvg_count}\n\n"
             f"Latest FVG\n{last_fvg}\n\n"
-            f"Range\nHigh/Low marked on chart\n\n"
-            f"Paper Mode\nENABLED\n\n"
-            f"Next Feature\nLive FVG confirmation engine"
+            f"Buy-In Plan\n{plan_note}\n\n"
+            f"How to use\nDrag ENTRY / STOP / TARGET lines on chart, then click Open Planned Paper Trade.\n\n"
+            f"Next Feature\nReal chart engine + auto FVG confirmation entries"
         )
 
-    def open_manual_trade(self) -> None:
+    def suggest_plan(self) -> None:
         if not self.candles.candles:
             self.log("No price yet")
             return
         price = self.candles.candles[-1].close
         side = self.side_box.currentText()
-        stop_pct = self.stop_box.value() / 100.0
         rr = self.rr_box.value()
-        if side == "LONG":
-            stop = price * (1 - stop_pct)
-            target = price + (price - stop) * rr
-        else:
-            stop = price * (1 + stop_pct)
-            target = price - (stop - price) * rr
+        self.chart.create_default_plan(price, side=side, rr=rr)
+
+    def on_chart_plan_changed(self, plan: dict) -> None:
+        self._syncing_plan = True
         try:
-            self.account.open_position(side, price, stop, target, self.size_box.value(), "Manual paper trade")
-            self.log(f"Opened {side} paper trade @ {price:,.2f} stop {stop:,.2f} target {target:,.2f}")
+            if plan.get("side") in ["LONG", "SHORT"]:
+                self.side_box.setCurrentText(str(plan["side"]))
+            for key, box in [("entry", self.entry_price_box), ("stop", self.stop_price_box), ("target", self.target_price_box)]:
+                val = plan.get(key)
+                if isinstance(val, (int, float)):
+                    box.setValue(float(val))
+            rr = float(plan.get("rr") or 0)
+            self.plan_rr_label.setText(f"RR {rr:.2f}:1")
+        finally:
+            self._syncing_plan = False
+
+    def on_plan_inputs_changed(self) -> None:
+        if self._syncing_plan:
+            return
+        entry = self.entry_price_box.value()
+        stop = self.stop_price_box.value()
+        target = self.target_price_box.value()
+        if entry > 1 and stop > 1 and target > 1:
+            self.chart.set_plan(self.side_box.currentText(), entry, stop, target)
+
+    def rebuild_plan_from_inputs(self) -> None:
+        if self._syncing_plan:
+            return
+        if self.candles.candles:
+            self.chart.create_default_plan(self.entry_price_box.value() if self.entry_price_box.value() > 1 else self.candles.candles[-1].close,
+                                           side=self.side_box.currentText(), rr=self.rr_box.value())
+
+    def open_planned_trade(self) -> None:
+        plan = self.chart.trade_plan
+        if not all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
+            self.log("No complete trade plan yet")
+            return
+        try:
+            self.account.open_position(
+                str(plan.get("side", "LONG")),
+                float(plan["entry"]),
+                float(plan["stop"]),
+                float(plan["target"]),
+                self.size_box.value(),
+                f"Planned paper trade RR {float(plan.get('rr', 0)):.2f}:1"
+            )
+            self.log(f"Opened planned {plan.get('side')} paper trade @ {float(plan['entry']):,.2f} stop {float(plan['stop']):,.2f} target {float(plan['target']):,.2f}")
         except Exception as e:
             self.log(str(e))
 
