@@ -56,6 +56,11 @@ class MainWindow(QMainWindow):
         self._last_timeline_state = ""
         self._auto_opened_signal_sig = ""
         self._last_self_tune_ts = 0.0
+        self._active_gap_key = ""
+        self._planned_gap_key = ""
+        self._used_gap_keys: set[str] = set()
+        self._last_15m_bucket = 0
+        self._last_15m_open = None
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
@@ -72,6 +77,8 @@ class MainWindow(QMainWindow):
         self.price_label.setObjectName("Title")
         self.timer_label = QLabel("15m: --:--")
         self.timer_label.setObjectName("Title")
+        self.move_label = QLabel("BTC15 Δ --")
+        self.move_label.setObjectName("Muted")
         self.feed_label = QLabel("● CONNECTING")
         self.feed_label.setObjectName("Muted")
         self.chart = ChartWidget()
@@ -156,13 +163,14 @@ class MainWindow(QMainWindow):
         top_l = QHBoxLayout(top)
         title = QLabel("BTC/USD • Coinbase"); title.setObjectName("Title")
         top_l.addWidget(title); top_l.addStretch(); top_l.addWidget(self.price_label)
-        top_l.addSpacing(20); top_l.addWidget(self.timer_label); top_l.addSpacing(20); top_l.addWidget(self.feed_label)
+        top_l.addSpacing(20); top_l.addWidget(self.timer_label); top_l.addSpacing(20); top_l.addWidget(self.move_label); top_l.addSpacing(20); top_l.addWidget(self.feed_label)
         root.addWidget(top)
 
         mid = QHBoxLayout()
         left = self._panel("Watchlist"); left.setFixedWidth(190)
-        watch = QListWidget(); watch.addItems(["BTC-USD", "ETH-USD", "Journal", "Backtests", "Settings"])
-        left.layout().addWidget(watch); mid.addWidget(left)
+        self.watchlist = QListWidget(); self.watchlist.addItems(["BTC-USD", "BTC Up/Down %", "ETH-USD", "Paper Trading", "Journal", "Signals", "Backtests", "Memory", "Settings"])
+        self.watchlist.itemClicked.connect(self.on_watchlist_clicked)
+        left.layout().addWidget(self.watchlist); mid.addWidget(left)
 
         chart_panel = self._panel("Live Chart")
         chart_tools = QHBoxLayout()
@@ -177,7 +185,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.4.1: stability hotfix • signal timeline • scroll-safe panels"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.5.0: chart polish • one GAP focus • better paper/autotune"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -213,7 +221,8 @@ class MainWindow(QMainWindow):
         mid.addWidget(right)
         root.addLayout(mid, 1)
 
-        tabs = QTabWidget()
+        self.tabs = QTabWidget()
+        tabs = self.tabs
         paper = QWidget(); paper_l = QVBoxLayout(paper)
         paper_l.addWidget(self.stats_label); paper_l.addWidget(self.open_trade_label); paper_l.addWidget(self.trades_box); paper_l.addStretch()
         audit_tab = QWidget(); audit_l = QVBoxLayout(audit_tab)
@@ -281,6 +290,7 @@ class MainWindow(QMainWindow):
         self.feed_label.setText("● LIVE")
         self.feed_label.setObjectName("Green")
         self.price_label.setText(f"Price: ${price:,.2f}")
+        self.update_btc15_move(price)
         candles = self.candles.update_price(price)
         # Paper trades are forced closed at the Kalshi BTC15 close time; no paper trade is allowed to survive past the 15m market.
         snap_for_trade = self.kalshi_timer.snapshot()
@@ -309,6 +319,43 @@ class MainWindow(QMainWindow):
             self._last_decision_signature = sig
             self.update_ai(price)
         self.update_stats()
+
+
+    def update_btc15_move(self, price: float) -> None:
+        # Watch the current 15-minute BTC move as UP/DOWN %. This is not a
+        # Kalshi contract price; it is the underlying BTC move within the active
+        # 15m candle/window so you can compare direction quickly.
+        bucket = int(time.time()) - (int(time.time()) % 900)
+        if self._last_15m_bucket != bucket or self._last_15m_open is None:
+            self._last_15m_bucket = bucket
+            # Prefer the first 1m candle inside this 15m window.
+            inside = [c for c in self.candles.candles if int(c.ts) >= bucket]
+            self._last_15m_open = float(inside[0].open) if inside else float(price)
+        base = float(self._last_15m_open or price)
+        pct = ((float(price) - base) / base * 100.0) if base else 0.0
+        arrow = "UP" if pct >= 0 else "DOWN"
+        self.move_label.setText(f"BTC15 {arrow} {pct:+.3f}%")
+        self.move_label.setObjectName("Green" if pct >= 0 else "Red")
+        self.move_label.style().unpolish(self.move_label); self.move_label.style().polish(self.move_label)
+
+    def on_watchlist_clicked(self, item) -> None:
+        name = item.text()
+        # Watchlist is now real navigation, not just decoration.
+        mapping = {
+            "Paper Trading": 0,
+            "Journal": 1,
+            "Signals": 2,
+            "Backtests": 6,
+            "Memory": 5,
+            "Settings": 7,
+            "BTC Up/Down %": 7,
+        }
+        if hasattr(self, "tabs") and name in mapping:
+            self.tabs.setCurrentIndex(mapping[name])
+        if name == "BTC Up/Down %":
+            self.log("BTC Up/Down % watches the underlying BTC move since the current 15-minute window opened.")
+        elif name == "ETH-USD":
+            self.log("ETH watchlist row is a placeholder for a future multi-market release. Current strategy remains BTC only.")
 
     def update_timer(self) -> None:
         import time
@@ -441,10 +488,10 @@ class MainWindow(QMainWindow):
         self._set_text_stable(self.thinking_box, text, "_last_thinking_text")
 
     def clean_chart_view(self) -> None:
-        self.chart.max_gap_boxes = 6
+        self.chart.max_gap_boxes = 3
         self.chart.show_filled_gaps = False
         self.chart.show_gap_labels = True
-        self.chart.show_swing_labels = True
+        self.chart.show_swing_labels = False
         self.chart._redraw()
         self.log("Clean Chart: reduced to the newest active GAP boxes, fewer labels, and major H/L only")
 
@@ -489,9 +536,13 @@ class MainWindow(QMainWindow):
         displayed automatically.
         """
         d = self.last_decision
+        gap_key = getattr(d, "active_fvg_key", "") if d else ""
+        if gap_key and hasattr(self.chart, "set_focus_gap_key"):
+            self.chart.set_focus_gap_key(gap_key)
+
         if not d or not d.ready or not d.plan:
             if d:
-                state = "WAIT:" + ";".join(getattr(d, "checklist", [])[-4:]) + ";" + ";".join(getattr(d, "reasons", [])[-3:])
+                state = "WAIT:" + str(gap_key) + ";" + ";".join(getattr(d, "checklist", [])[-4:]) + ";" + ";".join(getattr(d, "reasons", [])[-3:])
                 if state != self._last_timeline_state:
                     self._last_timeline_state = state
                     reason = (getattr(d, "reasons", [])[-1] if getattr(d, "reasons", []) else "Building candle context")
@@ -499,28 +550,35 @@ class MainWindow(QMainWindow):
             if not self.account.open_trade and self.chart.trade_plan.get("active"):
                 self.chart.clear_plan()
                 self._last_auto_plan_sig = ""
+                self._planned_gap_key = ""
             return
 
-        # Keep the visual plan live, but do not spam the journal every tick as
-        # BTC moves a few cents. The chart may update continuously; the Signal
-        # Journal only logs when a setup first becomes ready or materially changes.
-        visual_sig = f"{d.plan.side}:{d.plan.entry:.0f}:{d.plan.stop:.0f}:{d.plan.target:.0f}"
-        self.side_box.setCurrentText(d.plan.side)
-        self.chart.set_plan(d.plan.side, d.plan.entry, d.plan.stop, d.plan.target, active=True, mode="plan")
-        self._last_auto_plan_sig = visual_sig
+        # One focused GAP at a time: once a GAP has produced a plan/trade, do not
+        # spam fresh plans from that same FVG. Wait for a new GAP.
+        if gap_key in self._used_gap_keys and not self.account.open_trade:
+            if self.chart.trade_plan.get("active"):
+                self.chart.clear_plan()
+            self.log_timeline(f"SKIP | GAP already used {gap_key}")
+            return
 
-        log_sig = f"{d.plan.side}:{round(d.plan.stop/25)*25:.0f}:{round(d.plan.target/25)*25:.0f}:{d.grade}:{d.confidence//5*5}"
+        visual_sig = f"{gap_key}:{d.plan.side}:{d.plan.entry:.0f}:{d.plan.stop:.0f}:{d.plan.target:.0f}"
+        self.side_box.setCurrentText(d.plan.side)
+        if visual_sig != self._last_auto_plan_sig:
+            self.chart.set_plan(d.plan.side, d.plan.entry, d.plan.stop, d.plan.target, active=True, mode="plan")
+            self._last_auto_plan_sig = visual_sig
+            self._planned_gap_key = gap_key
+
+        log_sig = f"{gap_key}:{d.plan.side}:{round(d.plan.stop/25)*25:.0f}:{round(d.plan.target/25)*25:.0f}:{d.grade}:{d.confidence//5*5}"
         if log_sig != self._last_auto_log_sig:
             self._last_auto_log_sig = log_sig
             self.log_signal(
-                f"AUTO PLAN READY {d.plan.side} | buy-in {d.plan.entry:,.2f} | stop {d.plan.stop:,.2f} | "
+                f"AUTO PLAN READY {d.plan.side} | GAP {gap_key or 'unknown'} | buy-in {d.plan.entry:,.2f} | stop {d.plan.stop:,.2f} | "
                 f"target {d.plan.target:,.2f} | RR {d.plan.rr:.2f}:1 | confidence {d.confidence}% | grade {d.grade}"
             )
             self.log_timeline(
-                f"READY {d.plan.side} | Trend {d.trend_15m}/{d.trend_5m} | FVG {d.latest_fvg} | "
+                f"READY {d.plan.side} | GAP {gap_key or 'unknown'} | Trend {d.trend_15m}/{d.trend_5m} | FVG {d.latest_fvg} | "
                 f"Entry {d.plan.entry:,.2f} Stop {d.plan.stop:,.2f} Target {d.plan.target:,.2f}"
             )
-        # Major feature: optional hands-free paper mode. OFF by default.
         if self.auto_paper_toggle.isChecked() and not self.account.open_trade and log_sig != self._auto_opened_signal_sig:
             self._auto_opened_signal_sig = log_sig
             self.open_planned_trade()
@@ -573,6 +631,8 @@ class MainWindow(QMainWindow):
                 f"FVG setup | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | confidence {self.last_decision.confidence}% | RR {float(plan.get('rr', 0)):.2f}:1",
                 expires_at=self.kalshi_timer.snapshot().close_time.timestamp() if self.kalshi_timer.snapshot().close_time else None
             )
+            if self._planned_gap_key:
+                self._used_gap_keys.add(self._planned_gap_key)
             self.chart.set_plan(str(plan.get("side", "LONG")), float(plan["entry"]), float(plan["stop"]), float(plan["target"]), active=True, mode="trade")
             exp = self.kalshi_timer.snapshot().label()
             self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f} | expires BTC15 {exp}")
@@ -626,9 +686,9 @@ class MainWindow(QMainWindow):
                 result = "WIN" if tr.exit_reason == "TARGET" or tr.pnl > 0 else "LOSS"
                 reason = tr.exit_reason or ("TARGET" if tr.pnl > 0 else "STOP")
                 lines.append(f"#{tr.trade_id:04d} {result} {tr.side} via {reason} | size ${tr.size_usd:,.0f} | entry {tr.entry:,.2f} exit {float(tr.exit_price or 0):,.2f} P/L ${tr.pnl:,.2f}")
-            self.trades_box.setPlainText("\n".join(lines))
+            self._set_text_stable(self.trades_box, "\n".join(lines), "_last_trades_text")
         else:
-            self.trades_box.setPlainText("No closed paper trades yet. The account will update automatically after TP/SL is hit.")
+            self._set_text_stable(self.trades_box, "No closed paper trades yet. The account will update automatically after TP/SL is hit.", "_last_trades_text")
         self.update_audit_panel()
         self.update_learning_panel()
         self.update_memory_stats_panel()
@@ -760,7 +820,7 @@ class MainWindow(QMainWindow):
             f"Session P/L: ${total_pnl:,.2f}\n"
             f"Best trade: ${best:,.2f}\n"
             f"Worst trade: ${worst:,.2f}\n\n"
-            "Next: v0.4.x will use these records for similarity scoring before auto-paper opens."
+            "v0.5.0: one GAP at a time, similarity score, and conservative self auto-tune are active."
         )
         self._set_text_stable(self.memory_stats_box, text, "_last_memory_stats_text")
 

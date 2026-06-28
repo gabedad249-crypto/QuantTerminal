@@ -62,6 +62,8 @@ class ChartWidget(QGraphicsView):
         self.show_filled_gaps = False
         self.show_gap_labels = True
         self.show_swing_labels = False
+        self.focus_gap_key: str = ""
+        self.clean_mode: bool = True
 
         self._plot = QRectF(60, 12, 900, 360)
         self._last_mouse_redraw = 0.0
@@ -76,6 +78,14 @@ class ChartWidget(QGraphicsView):
         self.candles = candles[-800:]
         self.fvgs = self.engine.detect(self.candles)
         self._redraw()
+
+    def set_focus_gap_key(self, key: str) -> None:
+        if self.focus_gap_key != (key or ""):
+            self.focus_gap_key = key or ""
+            self._redraw()
+
+    def _fvg_key(self, fvg: FVG) -> str:
+        return f"{fvg.direction}:{int(fvg.end_ts)}:{round(fvg.top, 2)}:{round(fvg.bottom, 2)}"
 
     def set_live_price(self, price: float, pnl: float = 0.0, status: str = "") -> None:
         self.live_price = float(price)
@@ -290,8 +300,15 @@ class ChartWidget(QGraphicsView):
             if fvg.end_ts < visible_start or fvg.start_ts > visible_end:
                 continue
             drawable.append(fvg)
-        # Keep the chart clean: only latest relevant gaps. The strategy still sees all.
-        drawable = drawable[-self.max_gap_boxes:]
+        # v0.5.0: focus one GAP at a time. If the strategy has selected a
+        # focus FVG, only that GAP is emphasized. Otherwise show only a few
+        # recent active/touched gaps so the chart stays readable.
+        if self.focus_gap_key:
+            focused = [f for f in drawable if self._fvg_key(f) == self.focus_gap_key]
+            drawable = focused or drawable[-1:]
+        else:
+            active_first = [f for f in drawable if f.status != "FILLED"]
+            drawable = (active_first or drawable)[-min(self.max_gap_boxes, 3):]
 
         for fvg in drawable:
             indexes = [i for i, c in enumerate(candles) if fvg.start_ts <= c.ts <= fvg.end_ts]
@@ -304,18 +321,19 @@ class ChartWidget(QGraphicsView):
             y_top = self._y(fvg.top)
             y_bot = self._y(fvg.bottom)
 
+            is_focus = self.focus_gap_key and self._fvg_key(fvg) == self.focus_gap_key
             fill = QColor("#6b7280")
-            fill.setAlpha(16 if fvg.status == "FILLED" else 34)
-            border = QColor("#94a3b8")
+            fill.setAlpha(18 if fvg.status == "FILLED" else (56 if is_focus else 30))
+            border = QColor("#e5e7eb" if is_focus else "#94a3b8")
             if fvg.status == "TOUCHED":
                 border = QColor("#f59e0b")
             border.setAlpha(150)
-            pen = QPen(border, 1, Qt.DashLine if fvg.status == "FILLED" else Qt.SolidLine)
+            pen = QPen(border, 2 if is_focus else 1, Qt.DashLine if fvg.status == "FILLED" else Qt.SolidLine)
             self.scene.addRect(QRectF(x1, min(y_top, y_bot), x2 - x1, max(3, abs(y_bot - y_top))), pen, QBrush(fill))
 
             if self.show_gap_labels:
                 # Keep the chart clean: show GAP only, not giant bullish/bearish spam.
-                status = "GAP" if fvg.status != "FILLED" else "FILLED"
+                status = ("FOCUS GAP" if is_focus and fvg.status != "FILLED" else ("GAP" if fvg.status != "FILLED" else "FILLED"))
                 self._text(x1 + 4, min(y_top, y_bot) + 2, status, "#cbd5e1", 7)
 
     def _draw_high_low(self, candles: list[Candle]) -> None:

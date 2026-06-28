@@ -26,6 +26,9 @@ class SetupDecision:
     latest_fvg: str = "None"
     trend_15m: str = "Building"
     trend_5m: str = "Building"
+    active_fvg_key: str = ""
+    active_fvg_direction: str = ""
+    active_fvg_status: str = ""
 
 class FVGSetupEngine:
     """Disciplined FVG confirmation engine.
@@ -87,6 +90,10 @@ class FVGSetupEngine:
         candidates.sort(key=lambda x: (x[3], x[5]), reverse=True)
         fvg, side, impulse_ok, retrace_ok, confirmation, fvg_index = candidates[0]
         d.side = side
+        d.active_fvg_key = self._fvg_key(fvg)
+        d.active_fvg_direction = fvg.direction
+        d.active_fvg_status = fvg.status
+        d.latest_fvg = f"{fvg.direction} {fvg.status} #{int(fvg.end_ts)}"
         d.checklist.append("✅ FVG: aligned " + fvg.direction)
         d.checklist.append(("✅" if impulse_ok else "❌") + " Impulse: displacement candle strong enough")
         d.checklist.append(("✅" if retrace_ok else "❌") + " Retrace: price returned into the FVG")
@@ -139,6 +146,9 @@ class FVGSetupEngine:
         d.plan = TradePlan(side, entry, stop, target, rr, f"FVG confirmation: {confirmation}")
         d.reasons.append("VALID FVG CONFIRMATION SETUP")
         return d
+
+    def _fvg_key(self, fvg: FVG) -> str:
+        return f"{fvg.direction}:{int(fvg.end_ts)}:{round(fvg.top, 2)}:{round(fvg.bottom, 2)}"
 
     def _trend(self, candles: list[Candle], lookback: int = 4) -> str:
         if len(candles) < lookback + 1:
