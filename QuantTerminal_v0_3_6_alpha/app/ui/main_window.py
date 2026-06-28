@@ -48,6 +48,8 @@ class MainWindow(QMainWindow):
         self.last_decision = None
         self._learned_closed_trade_ids = set()
         self._last_auto_plan_sig = ""
+        self._last_auto_log_sig = ""
+        self._last_signal_ready = False
         self._last_ready_signal_sig = ""
         self._journal_lines: list[str] = []
         self._auto_opened_signal_sig = ""
@@ -167,7 +169,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.5: exact Kalshi URL • readiness border • auto paper mode"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.3.6: active Kalshi sync • real paper cash accounting • anti-spam signals"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel, 1)
@@ -182,6 +184,9 @@ class MainWindow(QMainWindow):
         planner = QFrame(); planner.setObjectName("Panel")
         fl = QFormLayout(planner)
         fl.addRow("Side", self.side_box)
+        side_help = QLabel("LONG = buy/up. SHORT = sell/down. The engine can paper-trade both.")
+        side_help.setObjectName("Muted")
+        fl.addRow(side_help)
         fl.addRow("Size", self.size_box)
         fl.addRow("Default stop", self.stop_box)
         fl.addRow("Target RR", self.rr_box)
@@ -269,7 +274,7 @@ class MainWindow(QMainWindow):
     def update_timer(self) -> None:
         import time
         now = time.time()
-        if now - self._last_kalshi_refresh > 20:
+        if now - self._last_kalshi_refresh > 5:
             self._last_kalshi_refresh = now
             self.kalshi_timer.refresh_async()
         snap = self.kalshi_timer.snapshot()
@@ -441,19 +446,24 @@ class MainWindow(QMainWindow):
                 self._last_auto_plan_sig = ""
             return
 
-        sig = f"{d.plan.side}:{d.plan.entry:.2f}:{d.plan.stop:.2f}:{d.plan.target:.2f}"
-        if sig == self._last_auto_plan_sig:
-            return
-        self._last_auto_plan_sig = sig
+        # Keep the visual plan live, but do not spam the journal every tick as
+        # BTC moves a few cents. The chart may update continuously; the Signal
+        # Journal only logs when a setup first becomes ready or materially changes.
+        visual_sig = f"{d.plan.side}:{d.plan.entry:.0f}:{d.plan.stop:.0f}:{d.plan.target:.0f}"
         self.side_box.setCurrentText(d.plan.side)
         self.chart.set_plan(d.plan.side, d.plan.entry, d.plan.stop, d.plan.target, active=True, mode="plan")
-        self.log_signal(
-            f"AUTO PLAN {d.plan.side} | buy-in {d.plan.entry:,.2f} | stop {d.plan.stop:,.2f} | "
-            f"target {d.plan.target:,.2f} | RR {d.plan.rr:.2f}:1 | confidence {d.confidence}% | grade {d.grade}"
-        )
+        self._last_auto_plan_sig = visual_sig
+
+        log_sig = f"{d.plan.side}:{round(d.plan.stop/25)*25:.0f}:{round(d.plan.target/25)*25:.0f}:{d.grade}:{d.confidence//5*5}"
+        if log_sig != self._last_auto_log_sig:
+            self._last_auto_log_sig = log_sig
+            self.log_signal(
+                f"AUTO PLAN READY {d.plan.side} | buy-in {d.plan.entry:,.2f} | stop {d.plan.stop:,.2f} | "
+                f"target {d.plan.target:,.2f} | RR {d.plan.rr:.2f}:1 | confidence {d.confidence}% | grade {d.grade}"
+            )
         # Major feature: optional hands-free paper mode. OFF by default.
-        if self.auto_paper_toggle.isChecked() and not self.account.open_trade and sig != self._auto_opened_signal_sig:
-            self._auto_opened_signal_sig = sig
+        if self.auto_paper_toggle.isChecked() and not self.account.open_trade and log_sig != self._auto_opened_signal_sig:
+            self._auto_opened_signal_sig = log_sig
             self.open_planned_trade()
 
     def on_chart_plan_changed(self, plan: dict) -> None:
@@ -518,8 +528,9 @@ class MainWindow(QMainWindow):
             if trade.status == "CLOSED" and id(trade) not in self._learned_closed_trade_ids:
                 self._learned_closed_trade_ids.add(id(trade))
                 self.learning.record_trade_outcome(trade)
-                result = "WIN" if trade.pnl > 0 else "LOSS"
-                self.log_signal(f"CLOSED {result} {trade.side} | exit {float(trade.exit_price or 0):,.2f} | P/L ${trade.pnl:,.2f}")
+                result = "WIN" if trade.exit_reason == "TARGET" or trade.pnl > 0 else "LOSS"
+                why = trade.exit_reason or ("TARGET" if trade.pnl > 0 else "STOP")
+                self.log_signal(f"CLOSED {result} {trade.side} via {why} | exit {float(trade.exit_price or 0):,.2f} | P/L ${trade.pnl:,.2f}")
                 if not self.account.open_trade:
                     self.chart.clear_plan(emit=False)
                 self.log(f"Learning saved outcome: {trade.side} P/L ${trade.pnl:,.2f}")
@@ -531,14 +542,16 @@ class MainWindow(QMainWindow):
     def update_stats(self) -> None:
         s = self.account.stats()
         self.stats_label.setText(
-            f"Balance: ${s['balance']:,.2f}    Open P/L: ${s['open_pnl']:,.2f}    "
+            f"Cash: ${s['balance']:,.2f}    Reserved: ${s.get('reserved', 0):,.2f}    "
+            f"Equity: ${s.get('equity', s['balance']):,.2f}    Open P/L: ${s['open_pnl']:,.2f}    "
             f"Closed P/L: ${s['closed_pnl']:,.2f}    Trades: {s['trades']}    "
             f"Win Rate: {s['win_rate']:.1f}%    Profit Factor: {s['profit_factor']:.2f}"
         )
         t = self.account.open_trade
         if t:
             self.open_trade_label.setText(
-                f"OPEN {t.side} | Entry {t.entry:,.2f} | Stop {t.stop:,.2f} | Target {t.target:,.2f} | P/L ${t.pnl:,.2f}"
+                f"OPEN {t.direction_label()} | Size ${t.size_usd:,.2f} | Entry {t.entry:,.2f} | "
+                f"Stop {t.stop:,.2f} | Target {t.target:,.2f} | Live P/L ${t.pnl:,.2f}"
             )
         else:
             self.open_trade_label.setText("No open paper trade")
@@ -546,8 +559,9 @@ class MainWindow(QMainWindow):
         if closed:
             lines = ["Recent closed paper trades:"]
             for tr in reversed(closed):
-                result = "WIN" if tr.pnl > 0 else "LOSS"
-                lines.append(f"{result} {tr.side} entry {tr.entry:,.2f} exit {float(tr.exit_price or 0):,.2f} P/L ${tr.pnl:,.2f}")
+                result = "WIN" if tr.exit_reason == "TARGET" or tr.pnl > 0 else "LOSS"
+                reason = tr.exit_reason or ("TARGET" if tr.pnl > 0 else "STOP")
+                lines.append(f"{result} {tr.side} via {reason} | size ${tr.size_usd:,.0f} | entry {tr.entry:,.2f} exit {float(tr.exit_price or 0):,.2f} P/L ${tr.pnl:,.2f}")
             self.trades_box.setPlainText("\n".join(lines))
         else:
             self.trades_box.setPlainText("No closed paper trades yet. The account will update automatically after TP/SL is hit.")

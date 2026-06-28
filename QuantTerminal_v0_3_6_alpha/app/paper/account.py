@@ -1,0 +1,124 @@
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+@dataclass
+class PaperTrade:
+    side: str
+    entry: float
+    stop: float
+    target: float
+    size_usd: float
+    reason: str
+    open_price: float
+    status: str = "OPEN"
+    exit_price: Optional[float] = None
+    pnl: float = 0.0
+    exit_reason: str = ""
+
+    def direction_label(self) -> str:
+        if self.side == "LONG":
+            return "LONG / BUY / UP"
+        return "SHORT / SELL / DOWN"
+
+
+@dataclass
+class PaperAccount:
+    starting_balance: float = 100000.0
+    balance: float = 100000.0
+    closed_pnl: float = 0.0
+    reserved: float = 0.0
+    trades: List[PaperTrade] = field(default_factory=list)
+
+    def __init__(self, starting_balance: float = 100000.0) -> None:
+        self.starting_balance = float(starting_balance)
+        self.balance = float(starting_balance)
+        self.closed_pnl = 0.0
+        self.reserved = 0.0
+        self.trades = []
+
+    @property
+    def open_trade(self) -> Optional[PaperTrade]:
+        return next((t for t in self.trades if t.status == "OPEN"), None)
+
+    @property
+    def buying_power(self) -> float:
+        return max(0.0, self.balance)
+
+    @property
+    def equity(self) -> float:
+        t = self.open_trade
+        return self.balance + self.reserved + (t.pnl if t else 0.0)
+
+    def open_position(self, side: str, entry: float, stop: float, target: float, size_usd: float, reason: str) -> PaperTrade:
+        side = side.upper().strip()
+        if side not in ("LONG", "SHORT"):
+            raise ValueError("side must be LONG or SHORT")
+        if self.open_trade:
+            raise RuntimeError("Paper trade already open")
+        size_usd = float(size_usd)
+        if size_usd <= 0:
+            raise ValueError("paper size must be greater than 0")
+        if size_usd > self.balance:
+            raise RuntimeError(f"Not enough paper buying power. Need ${size_usd:,.2f}, have ${self.balance:,.2f}")
+
+        trade = PaperTrade(
+            side=side,
+            entry=float(entry),
+            stop=float(stop),
+            target=float(target),
+            size_usd=size_usd,
+            reason=reason,
+            open_price=float(entry),
+        )
+        self.balance -= size_usd
+        self.reserved += size_usd
+        self.trades.append(trade)
+        return trade
+
+    def update(self, price: float) -> None:
+        trade = self.open_trade
+        if not trade:
+            return
+        price = float(price)
+        if trade.side == "LONG":
+            unrealized = (price - trade.entry) / trade.entry * trade.size_usd
+            hit_stop = price <= trade.stop
+            hit_target = price >= trade.target
+        else:
+            unrealized = (trade.entry - price) / trade.entry * trade.size_usd
+            hit_stop = price >= trade.stop
+            hit_target = price <= trade.target
+        trade.pnl = unrealized
+        if hit_stop or hit_target:
+            trade.status = "CLOSED"
+            trade.exit_price = price
+            trade.exit_reason = "TARGET" if hit_target else "STOP"
+            # Recalculate final P/L exactly from the actual exit price.
+            if trade.side == "LONG":
+                trade.pnl = (price - trade.entry) / trade.entry * trade.size_usd
+            else:
+                trade.pnl = (trade.entry - price) / trade.entry * trade.size_usd
+            self.closed_pnl += trade.pnl
+            self.reserved = max(0.0, self.reserved - trade.size_usd)
+            self.balance += trade.size_usd + trade.pnl
+
+    def stats(self) -> dict:
+        closed = [t for t in self.trades if t.status == "CLOSED"]
+        wins = [t for t in closed if t.exit_reason == "TARGET" or t.pnl > 0]
+        losses = [t for t in closed if t.exit_reason == "STOP" or t.pnl <= 0]
+        gross_wins = sum(t.pnl for t in wins if t.pnl > 0)
+        gross_losses = abs(sum(t.pnl for t in losses if t.pnl < 0))
+        return {
+            "balance": self.balance,
+            "reserved": self.reserved,
+            "buying_power": self.buying_power,
+            "equity": self.equity,
+            "closed_pnl": self.closed_pnl,
+            "open_pnl": self.open_trade.pnl if self.open_trade else 0.0,
+            "trades": len(closed),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": (len(wins) / len(closed) * 100) if closed else 0.0,
+            "profit_factor": (gross_wins / gross_losses) if gross_losses else (gross_wins if gross_wins else 0.0),
+        }

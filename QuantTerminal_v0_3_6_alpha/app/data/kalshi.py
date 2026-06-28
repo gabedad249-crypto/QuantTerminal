@@ -67,11 +67,19 @@ class KalshiBTC15Timer:
 
     def _refresh(self) -> None:
         try:
+            # Important: the Kalshi URL you paste can be a specific contract that
+            # has already rolled, while the phone app may be showing the current
+            # active 15-minute contract. Prefer the currently open KXBTC15M
+            # contract closing soonest. Exact target ticker is used only if it is
+            # still open and inside the active BTC15 window.
             market = None
-            if self.target_ticker:
-                market = self._get_exact_market(self.target_ticker)
+            exact = self._get_exact_market(self.target_ticker) if self.target_ticker else None
+            if exact and self._is_current_btc15_market(exact):
+                market = exact
             if not market:
                 market = self._find_active_btc15_market()
+            if not market and exact:
+                market = exact
             if not market:
                 self._set_error("No open BTC15 market found; using quarter-hour estimate")
                 return
@@ -113,12 +121,22 @@ class KalshiBTC15Timer:
             self.clock.last_error = "Target market changed; refreshing..."
         self.refresh_async()
 
+    def _is_current_btc15_market(self, market: dict) -> bool:
+        close_dt = self._parse_time(market.get("close_time") or market.get("latest_expiration_time"))
+        status = str(market.get("status", "")).lower()
+        now_dt = datetime.now(timezone.utc)
+        if not close_dt or close_dt <= now_dt:
+            return False
+        seconds = int((close_dt - now_dt).total_seconds())
+        # Active BTC15 market should close within roughly the next 15 minutes.
+        return seconds <= 16 * 60 and status in ("", "open", "active")
+
     def _get_exact_market(self, ticker: str) -> Optional[dict]:
         if not ticker:
             return None
         try:
             url = f"{self.BASE}/markets/{ticker}"
-            req = Request(url, headers={"User-Agent": "QuantTerminal/0.3.5"})
+            req = Request(url, headers={"User-Agent": "QuantTerminal/0.3.6"})
             with urlopen(req, timeout=7) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             market = data.get("market") or data
@@ -148,9 +166,9 @@ class KalshiBTC15Timer:
         # recommend using series/event/market fields instead of parsing tickers.
         now = int(time.time())
         searches = [
-            {"status": "open", "series_ticker": "KXBTC15M", "limit": 200},
-            {"status": "open", "event_ticker": "KXBTC15M", "limit": 200},
-            {"status": "open", "limit": 1000, "min_close_ts": now - 60, "max_close_ts": now + 3600},
+            {"status": "open", "series_ticker": "KXBTC15M", "limit": 500},
+            {"status": "open", "event_ticker": "KXBTC15M", "limit": 500},
+            {"status": "open", "limit": 1000, "min_close_ts": now - 60, "max_close_ts": now + 1800},
         ]
         all_markets: list[dict] = []
         for params in searches:
@@ -188,11 +206,15 @@ class KalshiBTC15Timer:
             # Prefer the market closing soonest after now, because that is the
             # active window the Kalshi UI usually shows.
             seconds = max(0, int((close_dt - now_dt).total_seconds()))
-            if seconds <= 15 * 60 + 90:
-                score += 6
+            if seconds <= 16 * 60:
+                score += 20
+            elif seconds <= 30 * 60:
+                score += 3
             if score >= 10:
                 scored.append((score, close_dt, m))
         if not scored:
             return None
+        # The phone app normally shows the nearest open BTC15 contract. If two
+        # candidates score similarly, choose the soonest close_time.
         scored.sort(key=lambda x: (-x[0], x[1]))
         return scored[0][2]
