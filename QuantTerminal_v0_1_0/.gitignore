@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+logs/*.log
+database/*.db
+config/settings.json
+cache/*
+screenshots/*
+exports/*
