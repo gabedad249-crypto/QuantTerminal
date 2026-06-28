@@ -628,6 +628,56 @@ class MainWindow(QMainWindow):
                 lines.append("   " + formula)
         self.audit_box.setPlainText("\n".join(lines))
 
+
+    def apply_auto_tune(self) -> None:
+        """Safely apply the learned minimum RR recommendation.
+
+        Auto-tune is conservative: it only changes the RR threshold after the
+        memory engine has enough closed paper trades. It does not change the
+        strategy or force trades.
+        """
+        current_rr = float(getattr(self.setup_engine, "min_rr", 2.0))
+        try:
+            result = self.learning.auto_tune(current_rr)
+        except Exception as exc:
+            msg = f"Auto-tune failed safely: {exc}"
+            self.auto_tune_box.setPlainText(msg)
+            self.log(msg)
+            return
+
+        if not result.get("ready"):
+            msg = result.get("reason", "Auto-tune is not ready yet.")
+            self.auto_tune_box.setPlainText(
+                "Safe Auto-Tune\n\n"
+                f"Status: WAIT\n"
+                f"Current minimum RR: {current_rr:.2f}:1\n"
+                f"Reason: {msg}\n\n"
+                "Needs more closed paper trades before changing settings."
+            )
+            self.log("Auto-tune skipped: " + msg)
+            return
+
+        new_rr = float(result.get("recommended_min_rr", current_rr))
+        self.setup_engine.min_rr = new_rr
+        # Keep visible RR control in sync without triggering noisy rebuilds.
+        if hasattr(self, "rr_box"):
+            self.rr_box.blockSignals(True)
+            self.rr_box.setValue(new_rr)
+            self.rr_box.blockSignals(False)
+
+        msg = (
+            "Safe Auto-Tune\n\n"
+            "Status: APPLIED\n"
+            f"Old minimum RR: {current_rr:.2f}:1\n"
+            f"New minimum RR: {new_rr:.2f}:1\n"
+            f"Sample: {int(result.get('sample', 0))} closed trades\n"
+            f"Win rate: {float(result.get('win_rate', 0.0)):.1f}%\n"
+            f"Avg P/L: ${float(result.get('avg_pnl', 0.0)):.2f}\n\n"
+            f"Reason: {result.get('reason', 'No reason supplied.')}"
+        )
+        self.auto_tune_box.setPlainText(msg)
+        self.log(f"Auto-tune applied: min RR {current_rr:.2f} -> {new_rr:.2f}")
+
     def update_memory_stats_panel(self) -> None:
         if not hasattr(self, "memory_stats_box"):
             return
