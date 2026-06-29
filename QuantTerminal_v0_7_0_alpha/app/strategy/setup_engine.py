@@ -40,13 +40,17 @@ class SetupDecision:
     confirmation: str = ""
     impulse_score: int = 0
     fvg_quality_score: int = 0
+    focused_gap: str = ""
+    invalidation_reason: str = ""
+    next_action: str = "Scanning"
+    time_left_seconds: int = 0
 
 
 class FVGSetupEngine:
     """Disciplined FVG confirmation engine.
 
-    v0.6.0 tightens the logic into a real state machine:
-    BUILDING_CONTEXT -> WAIT_TREND -> WAIT_FVG -> WAIT_PULLBACK -> WAIT_CONFIRMATION -> WAIT_RR -> READY.
+    v0.7.0 tightens the logic into a real state machine:
+    SCANNING -> FOUND_GAP -> WAIT_PULLBACK -> WAIT_CONFIRMATION -> READY_CHECK -> READY -> IN_TRADE -> LEARNING.
 
     It still uses exactly one core strategy:
     trend context -> displacement/FVG -> retrace into FVG -> engulfing/rejection confirmation -> RR check.
@@ -58,13 +62,31 @@ class FVGSetupEngine:
         self.min_candles = 90
         self.max_fvg_age_bars = 55
         self.min_confidence_to_trade = 72
+        self.focus_gap_key: str = ""
+        self.focus_side: str = ""
+        self.used_gap_keys: set[str] = set()
+        self.seconds_left: int | None = None
+        self.min_seconds_left = 90
+
+    def configure_context(self, used_gap_keys: set[str] | None = None, seconds_left: int | None = None) -> None:
+        """UI/runtime context for safety rules.
+
+        The strategy stays pure chart-first, but the app can tell it which GAPs
+        already produced a paper trade and how much BTC15 time remains.
+        """
+        if used_gap_keys is not None:
+            self.used_gap_keys = set(used_gap_keys)
+        self.seconds_left = seconds_left
 
     def evaluate(self, candles_1m: list[Candle]) -> SetupDecision:
         d = SetupDecision(ready=False)
+        d.state = "SCANNING"
         d.session_label = self._session_label()
+        if self.seconds_left is not None:
+            d.time_left_seconds = int(self.seconds_left)
         n = len(candles_1m)
         if n < self.min_candles:
-            d.state = "BUILDING_CONTEXT"
+            d.state = "SCANNING"
             d.reasons.append(f"Need more candles: {n}/{self.min_candles} loaded")
             d.checklist.append(f"❌ Context: waiting for at least {self.min_candles} one-minute candles")
             d.safety_checks.append("✅ Safe: no trade while context is building")
@@ -82,7 +104,7 @@ class FVGSetupEngine:
             d.side = trend_side
             d.confidence_breakdown.append(f"+18 Trend aligned: {d.trend_15m}/{d.trend_5m}")
         else:
-            d.state = "WAIT_TREND"
+            d.state = "SCANNING"
             d.reasons.append("15m/5m trend not aligned")
             d.confidence_breakdown.append("+0 Trend not aligned")
 
@@ -90,7 +112,7 @@ class FVGSetupEngine:
         d.fvg_count = len(fvgs)
         d.latest_fvg = (fvgs[-1].direction + " " + fvgs[-1].status) if fvgs else "None"
         if not fvgs:
-            d.state = "WAIT_FVG"
+            d.state = "FOUND_GAP"
             d.checklist.append("❌ FVG: none found")
             d.reasons.append("No fair value gap yet")
             d.confidence = self._score_from_breakdown(d.confidence_breakdown)
@@ -99,16 +121,32 @@ class FVGSetupEngine:
 
         current = candles_1m[-1]
         avg_body = self._avg_body(candles_1m[-45:-5])
+        if self.seconds_left is not None and self.seconds_left < self.min_seconds_left:
+            d.safety_checks.append(f"❌ BTC15 time: only {self.seconds_left}s left, need {self.min_seconds_left}s+")
+        else:
+            d.safety_checks.append("✅ BTC15 time: enough time left for setup")
         candidates = []
-        for fvg in fvgs[-18:]:
+        invalidated_focus = ""
+        for fvg in fvgs[-24:]:
             side = "LONG" if fvg.direction == "BULLISH" else "SHORT"
+            key = self._fvg_key(fvg)
+            # Direction lock / one-GAP focus: while a focus GAP is valid, ignore every other GAP.
+            if self.focus_gap_key and key != self.focus_gap_key:
+                continue
+            if key in self.used_gap_keys:
+                continue
             if trend_ok and side != trend_side:
+                if key == self.focus_gap_key:
+                    invalidated_focus = "trend flipped against focused GAP"
                 continue
             fvg_index = self._index_for_ts(candles_1m, fvg.end_ts)
             if fvg_index is None:
                 continue
             age = n - fvg_index
-            if age < 2 or age > self.max_fvg_age_bars:
+            invalid_reason = self._invalid_reason(fvg, current.close, avg_body, age)
+            if invalid_reason:
+                if key == self.focus_gap_key:
+                    invalidated_focus = invalid_reason
                 continue
             impulse_score = self._impulse_score(candles_1m, fvg_index, avg_body)
             fvg_quality = self._fvg_quality_score(fvg, current.close, avg_body, age)
@@ -117,22 +155,43 @@ class FVGSetupEngine:
             candidates.append((fvg, side, impulse_score, fvg_quality, retrace_ok, confirmation, fvg_index, age))
 
         if not candidates:
-            d.state = "WAIT_FVG"
+            d.state = "SCANNING" if not self.focus_gap_key else "FOUND_GAP"
             d.checklist.append("❌ FVG: found, but no fresh aligned GAP")
-            d.reasons.append("FVG exists but no fresh aligned setup")
+            if invalidated_focus:
+                d.invalidation_reason = invalidated_focus
+                d.reasons.append("Focused GAP invalidated: " + invalidated_focus)
+                d.safety_checks.append("❌ Invalidation: " + invalidated_focus)
+                self.focus_gap_key = ""
+                self.focus_side = ""
+            else:
+                d.reasons.append("FVG exists but no fresh aligned setup")
             d.confidence = self._score_from_breakdown(d.confidence_breakdown)
             d.grade = self._grade(d.confidence)
             return d
 
-        # One GAP at a time: prefer newest aligned GAP that is actually being retested.
-        candidates.sort(key=lambda x: (x[4], x[2] + x[3], x[6]), reverse=True)
-        fvg, side, impulse_score, fvg_quality, retrace_ok, confirmation, fvg_index, age = candidates[0]
+        # One GAP at a time: hold the focused GAP until invalidated/filled/expired.
+        if self.focus_gap_key:
+            focused = [x for x in candidates if self._fvg_key(x[0]) == self.focus_gap_key]
+            selected = focused[0] if focused else None
+        else:
+            candidates.sort(key=lambda x: (x[4], x[2] + x[3], x[6]), reverse=True)
+            selected = candidates[0]
+        if selected is None:
+            d.state = "SCANNING"
+            d.reasons.append("Focused GAP no longer valid")
+            self.focus_gap_key = ""
+            self.focus_side = ""
+            return d
+        fvg, side, impulse_score, fvg_quality, retrace_ok, confirmation, fvg_index, age = selected
+        self.focus_gap_key = self._fvg_key(fvg)
+        self.focus_side = side
         impulse_ok = impulse_score >= 12
         d.side = side
         d.impulse_score = impulse_score
         d.fvg_quality_score = fvg_quality
         d.confirmation = confirmation or ""
         d.active_fvg_key = self._fvg_key(fvg)
+        d.focused_gap = d.active_fvg_key
         d.active_fvg_direction = fvg.direction
         d.active_fvg_status = fvg.status
         d.latest_fvg = f"{fvg.direction} {fvg.status} #{int(fvg.end_ts)}"
@@ -173,15 +232,21 @@ class FVGSetupEngine:
             d.reasons.append("Waiting for engulfing/rejection confirmation")
             d.confidence_breakdown.append("+0 Confirmation not printed")
 
-        if not (trend_ok and impulse_ok and retrace_ok and confirmation and fvg_quality >= 10):
-            if d.state in ("BUILDING_CONTEXT", "WAIT_TREND"):
-                pass
+        time_ok = self.seconds_left is None or self.seconds_left >= self.min_seconds_left
+        if not time_ok:
+            d.reasons.append("BTC15 is too close to expiry for a new setup")
+            d.confidence_breakdown.append("+0 BTC15 time safety failed")
+        if not (trend_ok and impulse_ok and retrace_ok and confirmation and fvg_quality >= 10 and time_ok):
+            if not time_ok:
+                d.state = "SCANNING"
+            elif not trend_ok:
+                d.state = "SCANNING"
             elif not retrace_ok:
                 d.state = "WAIT_PULLBACK"
             elif not confirmation:
                 d.state = "WAIT_CONFIRMATION"
             else:
-                d.state = "WAIT_FVG_QUALITY"
+                d.state = "FOUND_GAP"
             d.confidence = min(85, self._score_from_breakdown(d.confidence_breakdown))
             d.grade = self._grade(d.confidence)
             return d
@@ -205,7 +270,7 @@ class FVGSetupEngine:
             if rr >= self.min_rr + 0.5:
                 d.confidence_breakdown.append("+6 Extra RR cushion")
         else:
-            d.state = "WAIT_RR"
+            d.state = "READY_CHECK"
             d.reasons.append("RR below minimum")
             d.confidence_breakdown.append("+0 RR below filter")
             d.confidence = min(80, self._score_from_breakdown(d.confidence_breakdown))
@@ -220,9 +285,11 @@ class FVGSetupEngine:
         if d.ready:
             d.reasons.append("VALID FVG CONFIRMATION SETUP")
             d.safety_checks.append("✅ Safety: valid setup, no trade active, RR passed")
+            d.next_action = "Open paper training trade"
         else:
             d.reasons.append("Setup exists but confidence below trade threshold")
             d.safety_checks.append("❌ Safety: confidence below threshold")
+            d.next_action = "Keep watching"
         return d
 
     def _fvg_key(self, fvg: FVG) -> str:
@@ -288,6 +355,21 @@ class FVGSetupEngine:
         status_score = {"ACTIVE": 7, "TOUCHED": 5, "FILLED": 0}.get(fvg.status, 3)
         age_score = 5 if age <= 18 else (3 if age <= 35 else 1)
         return max(0, min(20, size_score + status_score + age_score))
+
+    def _invalid_reason(self, fvg: FVG, price: float, avg_body: float, age: int) -> str:
+        if age < 2:
+            return "GAP too new; waiting for retest"
+        if age > self.max_fvg_age_bars:
+            return f"GAP expired after {age} bars"
+        if str(getattr(fvg, "status", "")).upper() == "FILLED":
+            return "GAP fully filled before confirmation"
+        lo = min(fvg.bottom, fvg.top)
+        hi = max(fvg.bottom, fvg.top)
+        gap_height = max(hi - lo, 0.01)
+        far = max(gap_height * 4.0, avg_body * 6.0, price * 0.0015)
+        if price > hi + far or price < lo - far:
+            return "price moved too far away from focused GAP"
+        return ""
 
     def _price_inside_fvg(self, price: float, fvg: FVG) -> bool:
         return min(fvg.bottom, fvg.top) <= price <= max(fvg.bottom, fvg.top)

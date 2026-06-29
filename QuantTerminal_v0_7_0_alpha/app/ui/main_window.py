@@ -112,9 +112,9 @@ class MainWindow(QMainWindow):
 
         self.side_box = QComboBox(); self.side_box.addItems(["LONG", "SHORT"])
         self.size_box = NoWheelDoubleSpinBox(); self.size_box.setRange(1, 100000); self.size_box.setDecimals(2); self.size_box.setSingleStep(1); self.size_box.setValue(20.00); self.size_box.setPrefix("$")
-        self.stop_box = NoWheelDoubleSpinBox(); self.stop_box.setRange(0.01, 100000); self.stop_box.setDecimals(2); self.stop_box.setSingleStep(0.10); self.stop_box.setValue(0.50); self.stop_box.setPrefix("$"); self.stop_box.setSuffix(" stop loss")
-        self.rr_box = NoWheelDoubleSpinBox(); self.rr_box.setRange(0.01, 100000); self.rr_box.setDecimals(2); self.rr_box.setSingleStep(0.10); self.rr_box.setValue(1.00); self.rr_box.setPrefix("$"); self.rr_box.setSuffix(" payout target")
-        self.min_rr_box = NoWheelDoubleSpinBox(); self.min_rr_box.setRange(0.5, 10); self.min_rr_box.setValue(float(self.setup_engine.min_rr)); self.min_rr_box.setSuffix("R filter")
+        self.stop_box = NoWheelDoubleSpinBox(); self.stop_box.setRange(0.01, 100000); self.stop_box.setDecimals(2); self.stop_box.setSingleStep(0.10); self.stop_box.setValue(0.50); self.stop_box.setPrefix("$")
+        self.rr_box = NoWheelDoubleSpinBox(); self.rr_box.setRange(0.01, 100000); self.rr_box.setDecimals(2); self.rr_box.setSingleStep(0.10); self.rr_box.setValue(1.00); self.rr_box.setPrefix("$")
+        self.min_rr_box = NoWheelDoubleSpinBox(); self.min_rr_box.setRange(0.5, 10); self.min_rr_box.setDecimals(2); self.min_rr_box.setValue(float(self.setup_engine.min_rr))
 
         self.entry_price_box = self._price_spin()
         self.stop_price_box = self._price_spin()
@@ -203,7 +203,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.6.4: live Ratio field • instant cash stop/payout updates"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.7.0: clean state logic • one GAP lifecycle • training labels"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -229,12 +229,9 @@ class MainWindow(QMainWindow):
         fl.addRow("Stop loss USD", self.stop_box)
         fl.addRow("Target payout USD", self.rr_box)
         fl.addRow("Min setup RR filter", self.min_rr_box)
-        fl.addRow("Planned buy-in", self.entry_price_box)
-        fl.addRow("Planned stop", self.stop_price_box)
-        fl.addRow("Planned target", self.target_price_box)
         fl.addRow("Ratio", self.plan_rr_label)
         fl.addRow("Auto paper", self.auto_paper_toggle)
-        note = QLabel("Training mode auto-opens paper trades only after READY. Stop loss and payout are cash values, so 0.50 means fifty cents. The Ratio row updates live from target payout ÷ stop loss. Min setup RR is the quality filter auto-tune adjusts.")
+        note = QLabel("Training mode auto-opens paper trades only after READY. 0.50 means fifty cents. Ratio updates from target payout ÷ stop loss. Chart lines show entry/stop/target.")
         note.setObjectName("Muted")
         fl.addRow(note)
         right.layout().addWidget(planner)
@@ -341,6 +338,11 @@ class MainWindow(QMainWindow):
             self.self_auto_tune()
             return
 
+        try:
+            snap_ctx = self.kalshi_timer.snapshot()
+            self.setup_engine.configure_context(self._used_gap_keys, snap_ctx.seconds_left())
+        except Exception:
+            self.setup_engine.configure_context(self._used_gap_keys, None)
         self.last_decision = self.setup_engine.evaluate(candles)
         self.learning.record_snapshot(price, self.last_decision)
         self.auto_manage_signal_plan()
@@ -479,9 +481,12 @@ class MainWindow(QMainWindow):
         safety = "\n".join(getattr(d, "safety_checks", [])[-8:]) or "Safety checks pending"
         sim = self.learning.similarity(d)
         sim_text = f"{sim['matches']} matches | {sim['win_rate']:.1f}% WR | avg ${sim['avg_pnl']:.2f} | score {sim['score']}/100 | {sim['label']}"
+        recommend_line = ""
+        if hasattr(self, "mode_box") and self.mode_box.currentText().startswith("Recommend") and d.ready:
+            recommend_line = f"\nRecommend Only: alert this setup, do not auto-paper. Suggested cash plan = {configured_cash_line}."
 
         ai_text = (
-            f"FVG Logic Engine v0.6.4\n\n"
+            f"FVG Logic Engine v0.7.0\n\n"
             f"State\n{getattr(d, 'state', 'UNKNOWN')}\n\n"
             f"Decision\n{('READY ' + d.side) if d.ready else 'WAIT'}\n\n"
             f"Grade / Confidence\n{d.grade} / {d.confidence}%\n\n"
@@ -494,9 +499,9 @@ class MainWindow(QMainWindow):
             f"Checklist\n{checklist}\n\n"
             f"Safety Rules\n{safety}\n\n"
             f"Configured Cash RR\n{configured_cash_line}\n\n"
-            f"Auto Plan\n{plan_note}\n\n"
+            f"Auto Plan\n{plan_note}{recommend_line}\n\n"
             f"Why Waiting / Why Ready\n{reasons}\n\n"
-            f"Hard Rule\nNo buy-in unless the state machine reaches READY: trend + impulse + GAP + pullback + confirmation + RR + safety."
+            f"Hard Rule\nNo buy-in unless state = READY: trend + impulse + focused GAP + pullback + confirmation + RR + safety."
         )
         self._set_text_stable(self.ai_box, ai_text, "_last_ai_text")
         self.update_thinking_panel(d)
@@ -573,18 +578,16 @@ class MainWindow(QMainWindow):
             "What must happen next\n"
         )
         state = getattr(d, 'state', 'UNKNOWN')
-        if state == "BUILDING_CONTEXT":
-            text += "Load more candles so the bot can compare current action to recent context.\n"
-        elif state == "WAIT_TREND":
-            text += "Wait for 15m/5m bias to stop fighting each other.\n"
-        elif state == "WAIT_FVG":
-            text += "Wait for a fresh aligned fair value gap created by displacement.\n"
+        if state == "SCANNING":
+            text += "Scanning for aligned trend, fresh GAP, and enough BTC15 time. No trade yet.\n"
+        elif state == "FOUND_GAP":
+            text += "A focused GAP exists. It must stay valid and pull back cleanly.\n"
         elif state == "WAIT_PULLBACK":
             text += "Wait for price to return into the focused GAP. No chasing.\n"
         elif state == "WAIT_CONFIRMATION":
             text += "Wait for engulfing or rejection confirmation after the pullback.\n"
-        elif state == "WAIT_RR":
-            text += "Skip until stop/target gives acceptable reward-to-risk.\n"
+        elif state == "READY_CHECK":
+            text += "Checking cash RR and safety rules before allowing a setup.\n"
         elif state == "READY":
             text += "Setup is valid. Paper Training may open automatically; Recommend Only will alert only.\n"
         else:
@@ -841,6 +844,26 @@ class MainWindow(QMainWindow):
             return side, entry, stop, target, rr
         return self._configured_plan_values(d)
 
+
+    def _trade_manager_state(self, trade, price: float) -> str:
+        snap = self.kalshi_timer.snapshot()
+        seconds_left = snap.seconds_left()
+        if trade.side == "LONG":
+            target_dist = max(0.0, trade.target - price)
+            stop_dist = max(0.0, price - trade.stop)
+        else:
+            target_dist = max(0.0, price - trade.target)
+            stop_dist = max(0.0, trade.stop - price)
+        total = max(target_dist + stop_dist, 0.0001)
+        danger = stop_dist / total
+        if seconds_left < 45:
+            return "EXPIRY SOON — watching BTC15 close"
+        if danger < 0.25:
+            return "DANGER — price is near stop"
+        if target_dist / total < 0.25:
+            return "NEAR TARGET — let exit rules work"
+        return "HOLD / WATCH — no new trades"
+
     def update_active_trade_decision(self, price: float) -> None:
         t = self.account.open_trade
         if not t:
@@ -868,6 +891,7 @@ class MainWindow(QMainWindow):
             f"BTC15 expires: {snap.label()}\n\n"
             f"Distance to target: {dist_target:,.2f}\n"
             f"Distance to stop:   {dist_stop:,.2f}\n\n"
+            f"Manager state: {self._trade_manager_state(t, price)}\n\n"
             "Exit rules:\n"
             "• Target hit = win.\n"
             "• Stop hit = loss.\n"
@@ -1022,6 +1046,32 @@ class MainWindow(QMainWindow):
             if self.latest_price is not None:
                 self.update_ai(float(self.latest_price))
 
+
+    def _setup_meta_for_trade(self) -> dict:
+        d = self.last_decision
+        if not d:
+            return {}
+        snap = self.kalshi_timer.snapshot()
+        return {
+            "state": str(getattr(d, "state", "")),
+            "side": str(getattr(d, "side", "")),
+            "confidence": int(getattr(d, "confidence", 0)),
+            "grade": str(getattr(d, "grade", "")),
+            "trend_15m": str(getattr(d, "trend_15m", "")),
+            "trend_5m": str(getattr(d, "trend_5m", "")),
+            "confirmation": str(getattr(d, "confirmation", "")),
+            "active_fvg_key": str(getattr(d, "active_fvg_key", "")),
+            "active_fvg_status": str(getattr(d, "active_fvg_status", "")),
+            "session_label": str(getattr(d, "session_label", "")),
+            "time_left_seconds": int(snap.seconds_left()),
+            "impulse_score": int(getattr(d, "impulse_score", 0)),
+            "fvg_quality_score": int(getattr(d, "fvg_quality_score", 0)),
+            "cash_buy_in": self._cash_size(),
+            "cash_stop_loss": self._cash_stop_loss(),
+            "cash_payout": self._cash_payout(),
+            "cash_rr": self._cash_payout() / max(self._cash_stop_loss(), 0.01),
+        }
+
     def open_planned_trade(self) -> None:
         plan = self.chart.trade_plan
         if not plan.get("active") or not all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
@@ -1038,7 +1088,8 @@ class MainWindow(QMainWindow):
                 float(plan["target"]),
                 self._cash_size(),
                 f"FVG setup | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | confidence {self.last_decision.confidence}% | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} RR {self._cash_metrics_from_prices(str(plan.get('side', 'LONG')), float(plan['entry']), float(plan['stop']), float(plan['target']))['rr']:.2f}:1",
-                expires_at=self.kalshi_timer.snapshot().close_time.timestamp() if self.kalshi_timer.snapshot().close_time else None
+                expires_at=self.kalshi_timer.snapshot().close_time.timestamp() if self.kalshi_timer.snapshot().close_time else None,
+                setup_meta=self._setup_meta_for_trade()
             )
             if self._planned_gap_key:
                 self._used_gap_keys.add(self._planned_gap_key)
@@ -1231,7 +1282,7 @@ class MainWindow(QMainWindow):
             f"Session P/L: ${total_pnl:,.2f}\n"
             f"Best trade: ${best:,.2f}\n"
             f"Worst trade: ${worst:,.2f}\n\n"
-            "v0.6.0: state machine, confidence breakdown, setup clusters, and conservative self auto-tune are active."
+            "v0.7.0: clean state machine, one-GAP focus, invalidation rules, training labels, and guardrailed auto-tune are active."
         )
         self._set_text_stable(self.memory_stats_box, text, "_last_memory_stats_text")
 

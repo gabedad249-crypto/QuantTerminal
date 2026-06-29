@@ -77,6 +77,7 @@ class LearningMemory:
     def record_trade_outcome(self, trade: Any) -> None:
         if not self.enabled:
             return
+        meta = dict(getattr(trade, "setup_meta", {}) or {})
         row = {
             "ts": time.time(),
             "side": getattr(trade, "side", ""),
@@ -92,6 +93,19 @@ class LearningMemory:
             "size_usd": getattr(trade, "size_usd", 0.0),
             "duration_sec": (float(getattr(trade, "closed_at", 0) or 0) - float(getattr(trade, "opened_at", 0) or 0)) if getattr(trade, "closed_at", None) else 0,
             "cluster": self._cluster_from_trade(trade),
+            "setup_meta": meta,
+            "state_at_entry": meta.get("state", ""),
+            "confirmation": meta.get("confirmation", ""),
+            "trend_15m": meta.get("trend_15m", ""),
+            "trend_5m": meta.get("trend_5m", ""),
+            "fvg_key": meta.get("active_fvg_key", ""),
+            "fvg_status": meta.get("active_fvg_status", ""),
+            "session_label": meta.get("session_label", ""),
+            "confidence": meta.get("confidence", 0),
+            "grade": meta.get("grade", ""),
+            "time_left_at_entry": meta.get("time_left_seconds", 0),
+            "impulse_score": meta.get("impulse_score", 0),
+            "fvg_quality_score": meta.get("fvg_quality_score", 0),
         }
         with self.outcomes_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
@@ -131,11 +145,13 @@ class LearningMemory:
                 score += 3
             if signature and any(part and part in cluster for part in signature.split("|")[:4]):
                 score += 2
-            if trend_15m and trend_15m.upper() in reason:
+            if trend_15m and (trend_15m.upper() in reason or trend_15m == str(row.get("trend_15m", ""))):
                 score += 1
-            if trend_5m and trend_5m.upper() in reason:
+            if trend_5m and (trend_5m.upper() in reason or trend_5m == str(row.get("trend_5m", ""))):
                 score += 1
-            if session and session.upper() in cluster.upper():
+            if session and (session.upper() in cluster.upper() or session == str(row.get("session_label", ""))):
+                score += 1
+            if str(getattr(decision, "confirmation", "")) and str(getattr(decision, "confirmation", "")) == str(row.get("confirmation", "")):
                 score += 1
             if "FVG" in reason or "FVG" in latest:
                 score += 1
@@ -245,6 +261,9 @@ class LearningMemory:
         side = str(getattr(trade, "side", "")) or "UNKNOWN"
         reason = str(getattr(trade, "reason", ""))
         # Reason is usually: FVG setup | trend15/trend5 | fvg | confidence ...
+        meta = dict(getattr(trade, "setup_meta", {}) or {})
+        if meta:
+            return f"{side} | {meta.get('trend_15m','?')}/{meta.get('trend_5m','?')} | {meta.get('confirmation','confirm?')} | {meta.get('session_label','session?')}"
         parts = [p.strip() for p in reason.split("|")]
         trend = parts[1] if len(parts) > 1 else "trend?"
         fvg = parts[2] if len(parts) > 2 else "FVG"

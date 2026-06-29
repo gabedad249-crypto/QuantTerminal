@@ -20,6 +20,7 @@ class PaperTrade:
     closed_at: Optional[float] = None
     expires_at: Optional[float] = None
     trade_id: int = 0
+    setup_meta: dict = field(default_factory=dict)
 
     @property
     def risk_per_unit(self) -> float:
@@ -79,7 +80,7 @@ class PaperAccount:
         t = self.open_trade
         return self.balance + self.reserved + (t.pnl if t else 0.0)
 
-    def open_position(self, side: str, entry: float, stop: float, target: float, size_usd: float, reason: str, expires_at: Optional[float] = None) -> PaperTrade:
+    def open_position(self, side: str, entry: float, stop: float, target: float, size_usd: float, reason: str, expires_at: Optional[float] = None, setup_meta: Optional[dict] = None) -> PaperTrade:
         side = side.upper().strip()
         if side not in ("LONG", "SHORT"):
             raise ValueError("side must be LONG or SHORT")
@@ -101,6 +102,7 @@ class PaperAccount:
             open_price=float(entry),
             expires_at=expires_at,
             trade_id=self.next_trade_id,
+            setup_meta=dict(setup_meta or {}),
         )
         self.next_trade_id += 1
         self.balance -= size_usd
