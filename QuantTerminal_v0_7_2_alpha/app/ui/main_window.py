@@ -203,7 +203,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.7.0: clean state logic • one GAP lifecycle • training labels"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.7.2: 5m bias → 1m execution • paper probes • trade diagnostics"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -486,13 +486,16 @@ class MainWindow(QMainWindow):
             recommend_line = f"\nRecommend Only: alert this setup, do not auto-paper. Suggested cash plan = {configured_cash_line}."
 
         ai_text = (
-            f"FVG Logic Engine v0.7.0\n\n"
+            f"FVG Logic Engine v0.7.2\n\n"
             f"State\n{getattr(d, 'state', 'UNKNOWN')}\n\n"
             f"Decision\n{('READY ' + d.side) if d.ready else 'WAIT'}\n\n"
             f"Grade / Confidence\n{d.grade} / {d.confidence}%\n\n"
             f"Confidence Breakdown\n{breakdown}\n\n"
             f"15m Trend\n{d.trend_15m}\n\n"
             f"5m Trend\n{d.trend_5m}\n\n"
+            f"Entry Model\n{getattr(d, 'entry_model', 'FVG')}\n\n"
+            f"5m Bias\n{getattr(d, 'higher_tf_bias', 'WAIT')}\n\n"
+            f"Trigger Quality\n{getattr(d, 'trigger_quality', 'Waiting')} {'(paper probe)' if getattr(d, 'training_probe', False) else ''}\n\n"
             f"Session\n{getattr(d, 'session_label', 'Unknown')}\n\n"
             f"Focused GAP\n{d.latest_fvg}\n\n"
             f"Similarity Memory\n{sim_text}\n\n"
@@ -501,7 +504,7 @@ class MainWindow(QMainWindow):
             f"Configured Cash RR\n{configured_cash_line}\n\n"
             f"Auto Plan\n{plan_note}{recommend_line}\n\n"
             f"Why Waiting / Why Ready\n{reasons}\n\n"
-            f"Hard Rule\nNo buy-in unless state = READY: trend + impulse + focused GAP + pullback + confirmation + RR + safety."
+            f"Hard Rule\nNo buy-in unless state = READY. In Paper Training, B-grade 5m→1m probes are allowed so the bot can collect learning data."
         )
         self._set_text_stable(self.ai_box, ai_text, "_last_ai_text")
         self.update_thinking_panel(d)
@@ -537,15 +540,17 @@ class MainWindow(QMainWindow):
             "FVG Method State Machine\n\n"
             f"{timer_line}\n\n"
             f"Current State: {getattr(d, 'state', 'UNKNOWN')}\n"
+            f"Entry Model: {getattr(d, 'entry_model', 'FVG')}\n"
+            f"5m Bias: {getattr(d, 'higher_tf_bias', 'WAIT')} | Trigger: {getattr(d, 'trigger_quality', 'Waiting')}\n"
             f"Setup Signature: {getattr(d, 'setup_signature', '') or 'None yet'}\n\n"
             "Question Process\n"
             "1. Do we have enough 1m candles?\n"
-            "2. Are 15m and 5m trend aligned?\n"
-            "3. Did impulse create a clean FVG/GAP?\n"
-            "4. Did price pull back into the GAP?\n"
-            "5. Did engulfing/rejection confirm?\n"
-            "6. Is RR >= minimum?\n"
-            "7. Do safety rules allow a trade?\n\n"
+            "2. What is the 5m bias / 15m context?\n"
+            "3. Did 1m print an execution FVG/GAP?\n"
+            "4. Did price pull back into or near the GAP?\n"
+            "5. Did a 1m displacement/engulfing/rejection trigger?\n"
+            "6. Does cash RR pass your filter?\n"
+            "7. Do safety rules allow a paper trade?\n\n"
             "Live Checklist\n" + "\n".join(checklist[-12:]) + "\n\n"
             "Confidence Breakdown\n" + "\n".join(breakdown[-12:]) + "\n\n"
             "Safety\n" + "\n".join(safety[-10:]) + "\n\n"
@@ -574,6 +579,8 @@ class MainWindow(QMainWindow):
             f"Grade: {getattr(d, 'grade', 'WAIT')}\n"
             f"Confidence: {getattr(d, 'confidence', 0)}%\n"
             f"Session: {getattr(d, 'session_label', 'Unknown')}\n"
+            f"Entry Model: {getattr(d, 'entry_model', 'FVG')}\n"
+            f"5m Bias: {getattr(d, 'higher_tf_bias', 'WAIT')} | Trigger: {getattr(d, 'trigger_quality', 'Waiting')}\n"
             f"Focused GAP: {getattr(d, 'latest_fvg', 'None')}\n\n"
             "What must happen next\n"
         )
@@ -589,7 +596,7 @@ class MainWindow(QMainWindow):
         elif state == "READY_CHECK":
             text += "Checking cash RR and safety rules before allowing a setup.\n"
         elif state == "READY":
-            text += "Setup is valid. Paper Training may open automatically; Recommend Only will alert only.\n"
+            text += "Setup is valid. Paper Training may open automatically; Recommend Only will alert only. B-grade probes are clearly labeled.\n"
         else:
             text += "Monitoring.\n"
         text += (
@@ -1070,6 +1077,10 @@ class MainWindow(QMainWindow):
             "cash_stop_loss": self._cash_stop_loss(),
             "cash_payout": self._cash_payout(),
             "cash_rr": self._cash_payout() / max(self._cash_stop_loss(), 0.01),
+            "entry_model": str(getattr(d, "entry_model", "")),
+            "higher_tf_bias": str(getattr(d, "higher_tf_bias", "")),
+            "trigger_quality": str(getattr(d, "trigger_quality", "")),
+            "training_probe": bool(getattr(d, "training_probe", False)),
         }
 
     def open_planned_trade(self) -> None:
@@ -1087,7 +1098,7 @@ class MainWindow(QMainWindow):
                 float(plan["stop"]),
                 float(plan["target"]),
                 self._cash_size(),
-                f"FVG setup | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | confidence {self.last_decision.confidence}% | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} RR {self._cash_metrics_from_prices(str(plan.get('side', 'LONG')), float(plan['entry']), float(plan['stop']), float(plan['target']))['rr']:.2f}:1",
+                f"{getattr(self.last_decision, 'entry_model', 'FVG setup')} | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | {getattr(self.last_decision, 'trigger_quality', 'trigger')} | confidence {self.last_decision.confidence}% | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} RR {self._cash_metrics_from_prices(str(plan.get('side', 'LONG')), float(plan['entry']), float(plan['stop']), float(plan['target']))['rr']:.2f}:1",
                 expires_at=self.kalshi_timer.snapshot().close_time.timestamp() if self.kalshi_timer.snapshot().close_time else None,
                 setup_meta=self._setup_meta_for_trade()
             )
@@ -1282,7 +1293,7 @@ class MainWindow(QMainWindow):
             f"Session P/L: ${total_pnl:,.2f}\n"
             f"Best trade: ${best:,.2f}\n"
             f"Worst trade: ${worst:,.2f}\n\n"
-            "v0.7.0: clean state machine, one-GAP focus, invalidation rules, training labels, and guardrailed auto-tune are active."
+            "v0.7.2: 5m bias -> 1m execution, paper-training probes, one-GAP lifecycle, and guardrailed auto-tune are active."
         )
         self._set_text_stable(self.memory_stats_box, text, "_last_memory_stats_text")
 

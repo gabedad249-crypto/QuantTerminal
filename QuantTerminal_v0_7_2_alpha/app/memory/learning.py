@@ -106,6 +106,10 @@ class LearningMemory:
             "time_left_at_entry": meta.get("time_left_seconds", 0),
             "impulse_score": meta.get("impulse_score", 0),
             "fvg_quality_score": meta.get("fvg_quality_score", 0),
+            "entry_model": meta.get("entry_model", ""),
+            "higher_tf_bias": meta.get("higher_tf_bias", ""),
+            "trigger_quality": meta.get("trigger_quality", ""),
+            "training_probe": meta.get("training_probe", False),
         }
         with self.outcomes_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
@@ -152,6 +156,10 @@ class LearningMemory:
             if session and (session.upper() in cluster.upper() or session == str(row.get("session_label", ""))):
                 score += 1
             if str(getattr(decision, "confirmation", "")) and str(getattr(decision, "confirmation", "")) == str(row.get("confirmation", "")):
+                score += 1
+            if str(getattr(decision, "entry_model", "")) and str(getattr(decision, "entry_model", "")) == str(row.get("entry_model", "")):
+                score += 1
+            if str(getattr(decision, "higher_tf_bias", "")) and str(getattr(decision, "higher_tf_bias", "")) == str(row.get("higher_tf_bias", "")):
                 score += 1
             if "FVG" in reason or "FVG" in latest:
                 score += 1

@@ -44,12 +44,16 @@ class SetupDecision:
     invalidation_reason: str = ""
     next_action: str = "Scanning"
     time_left_seconds: int = 0
+    entry_model: str = "FVG"
+    higher_tf_bias: str = "WAIT"
+    trigger_quality: str = "Waiting"
+    training_probe: bool = False
 
 
 class FVGSetupEngine:
     """Disciplined FVG confirmation engine.
 
-    v0.7.1 keeps the clean state machine but adds warmup/probe rules so it actually takes valid paper trades:
+    v0.7.2 adds a TradersNotes-style 5m bias -> 1m execution model plus a training-probe mode so it actually produces paper trades:
     SCANNING -> FOUND_GAP -> WAIT_PULLBACK -> WAIT_CONFIRMATION -> READY_CHECK -> READY -> IN_TRADE -> LEARNING.
 
     It still uses exactly one core strategy:
@@ -61,14 +65,15 @@ class FVGSetupEngine:
         self.min_rr = float(min_rr)
         # v0.7.0 was too strict and could sit all day without training data.
         # These are still guarded, but loose enough to let the paper bot learn.
-        self.min_candles = 45
-        self.max_fvg_age_bars = 90
-        self.min_confidence_to_trade = 62
+        self.min_candles = 35
+        self.max_fvg_age_bars = 55
+        self.min_confidence_to_trade = 54
         self.focus_gap_key: str = ""
         self.focus_side: str = ""
         self.used_gap_keys: set[str] = set()
         self.seconds_left: int | None = None
-        self.min_seconds_left = 45
+        self.min_seconds_left = 35
+        self.training_probe_enabled = True
 
     def configure_context(self, used_gap_keys: set[str] | None = None, seconds_left: int | None = None) -> None:
         """UI/runtime context for safety rules.
@@ -99,16 +104,27 @@ class FVGSetupEngine:
         candles_15m = aggregate_candles(candles_1m, 900)
         d.trend_5m = self._trend(candles_5m, lookback=min(6, max(2, len(candles_5m)-1)))
         d.trend_15m = self._trend(candles_15m, lookback=min(4, max(2, len(candles_15m)-1)))
+        htf_fvgs = self.fvg_engine.detect(candles_5m) if len(candles_5m) >= 3 else []
+        htf_side = self._latest_bias_from_fvgs(htf_fvgs)
+        d.higher_tf_bias = htf_side
         trend_side = self._trend_side(d.trend_15m, d.trend_5m)
+        if trend_side not in ("LONG", "SHORT") and htf_side in ("LONG", "SHORT"):
+            trend_side = htf_side
+        if trend_side not in ("LONG", "SHORT"):
+            trend_side = self._micro_momentum_side(candles_1m)
         trend_ok = trend_side in ("LONG", "SHORT")
-        d.checklist.append(("✅" if trend_ok else "❌") + f" Trend: 15m {d.trend_15m}, 5m {d.trend_5m}")
+        d.entry_model = "5m bias -> 1m FVG execution"
+        d.checklist.append(("✅" if trend_ok else "❌") + f" Bias: 15m {d.trend_15m}, 5m {d.trend_5m}, 5m GAP bias {htf_side}")
         if trend_ok:
             d.side = trend_side
-            d.confidence_breakdown.append(f"+18 Trend aligned: {d.trend_15m}/{d.trend_5m}")
+            if htf_side in ("LONG", "SHORT"):
+                d.confidence_breakdown.append(f"+20 5m bias -> 1m execution bias: {htf_side}")
+            else:
+                d.confidence_breakdown.append(f"+14 Trend/momentum bias: {trend_side}")
         else:
             d.state = "SCANNING"
-            d.reasons.append("15m/5m trend not aligned")
-            d.confidence_breakdown.append("+0 Trend not aligned")
+            d.reasons.append("No clean 5m/1m directional bias yet")
+            d.confidence_breakdown.append("+0 Bias not ready")
 
         fvgs = self.fvg_engine.detect(candles_1m)
         d.fvg_count = len(fvgs)
@@ -137,11 +153,11 @@ class FVGSetupEngine:
                 continue
             if key in self.used_gap_keys:
                 continue
-            # Direction preference: aligned trend is best, but when 15m is still building/sideways,
-            # let a clean 1m/5m GAP train in paper mode instead of freezing forever.
+            # Direction lock: use 5m bias first, then trend/micro momentum.
+            # This is the TradersNotes style: mark bias on 5m, execute on 1m.
             if trend_ok and side != trend_side:
                 if key == self.focus_gap_key:
-                    invalidated_focus = "trend flipped against focused GAP"
+                    invalidated_focus = "direction bias flipped against focused GAP"
                 continue
             fvg_index = self._index_for_ts(candles_1m, fvg.end_ts)
             if fvg_index is None:
@@ -191,7 +207,7 @@ class FVGSetupEngine:
         fvg, side, impulse_score, fvg_quality, retrace_ok, confirmation, fvg_index, age = selected
         self.focus_gap_key = self._fvg_key(fvg)
         self.focus_side = side
-        impulse_ok = impulse_score >= 8
+        impulse_ok = impulse_score >= 5
         d.side = side
         d.impulse_score = impulse_score
         d.fvg_quality_score = fvg_quality
@@ -205,7 +221,7 @@ class FVGSetupEngine:
 
         d.checklist.append("✅ FVG: aligned " + fvg.direction)
         d.checklist.append(("✅" if impulse_ok else "❌") + f" Impulse: score {impulse_score}/20")
-        d.checklist.append(("✅" if fvg_quality >= 6 else "❌") + f" GAP quality: score {fvg_quality}/20")
+        d.checklist.append(("✅" if fvg_quality >= 4 else "❌") + f" GAP quality: score {fvg_quality}/20")
         d.checklist.append(("✅" if retrace_ok else "❌") + " Retrace: price returned into the GAP")
         d.checklist.append(("✅" if confirmation else "❌") + f" Confirmation: {confirmation or 'waiting for engulfing/rejection candle'}")
         d.safety_checks.append("✅ One-GAP lifecycle: one active plan per GAP")
@@ -217,7 +233,7 @@ class FVGSetupEngine:
             d.reasons.append("FVG impulse is weak")
             d.confidence_breakdown.append(f"+{impulse_score} Weak impulse")
 
-        if fvg_quality >= 6:
+        if fvg_quality >= 4:
             d.confidence_breakdown.append(f"+{fvg_quality} GAP quality")
         else:
             d.reasons.append("GAP quality is weak or already messy")
@@ -231,6 +247,7 @@ class FVGSetupEngine:
             d.confidence_breakdown.append("+0 Waiting for pullback")
 
         if confirmation:
+            d.trigger_quality = "Strong" if "Engulfing" in confirmation or "Rejection" in confirmation else "Good"
             d.confidence_breakdown.append("+18 " + confirmation)
         else:
             if retrace_ok:
@@ -242,16 +259,35 @@ class FVGSetupEngine:
         if not time_ok:
             d.reasons.append("BTC15 is too close to expiry for a new setup")
             d.confidence_breakdown.append("+0 BTC15 time safety failed")
-        # Warmup/probe logic: aligned trend is preferred, but not required when higher TF is building.
+
+        # Relaxed but disciplined training gate. The bot needs data, so it can take
+        # B-grade paper probes when the 5m/1m direction is aligned and price retests
+        # the GAP. Those probes are labeled for memory instead of pretending they are A+ setups.
         trend_gate = trend_ok or d.trend_15m in ("Building", "Sideways") or d.trend_5m in ("Bullish", "Bearish")
-        if not (trend_gate and impulse_ok and retrace_ok and confirmation and fvg_quality >= 6 and time_ok):
+        strong_setup = bool(trend_gate and impulse_ok and retrace_ok and confirmation and fvg_quality >= 4 and time_ok)
+        probe_setup = bool(
+            self.training_probe_enabled
+            and trend_gate
+            and time_ok
+            and retrace_ok
+            and impulse_score >= 4
+            and fvg_quality >= 3
+            and (confirmation or self._directional_close(candles_1m, side))
+        )
+        if probe_setup and not strong_setup:
+            d.training_probe = True
+            d.trigger_quality = "Training Probe"
+            d.confidence_breakdown.append("+8 Training probe allowed for paper data")
+            d.reasons.append("PAPER TRAINING PROBE: not perfect, but valid enough to collect outcome data")
+
+        if not (strong_setup or probe_setup):
             if not time_ok:
                 d.state = "SCANNING"
             elif not trend_gate:
                 d.state = "SCANNING"
             elif not retrace_ok:
                 d.state = "WAIT_PULLBACK"
-            elif not confirmation:
+            elif not (confirmation or self._directional_close(candles_1m, side)):
                 d.state = "WAIT_CONFIRMATION"
             else:
                 d.state = "FOUND_GAP"
@@ -289,9 +325,9 @@ class FVGSetupEngine:
         d.confidence = min(96, self._score_from_breakdown(d.confidence_breakdown))
         d.grade = self._grade(d.confidence)
         d.ready = d.confidence >= self.min_confidence_to_trade
-        d.plan = TradePlan(side, entry, stop, target, rr, f"FVG confirmation: {confirmation}")
+        d.plan = TradePlan(side, entry, stop, target, rr, f"{d.entry_model}: {confirmation or d.trigger_quality or 'Training Probe'}")
         if d.ready:
-            d.reasons.append("VALID FVG CONFIRMATION SETUP")
+            d.reasons.append("VALID FVG CONFIRMATION SETUP" if not d.training_probe else "VALID PAPER TRAINING PROBE")
             d.safety_checks.append("✅ Safety: valid setup, no trade active, RR passed")
             d.next_action = "Open paper training trade"
         else:
@@ -302,6 +338,35 @@ class FVGSetupEngine:
 
     def _fvg_key(self, fvg: FVG) -> str:
         return f"{fvg.direction}:{int(fvg.end_ts)}:{round(fvg.top, 2)}:{round(fvg.bottom, 2)}"
+
+
+    def _latest_bias_from_fvgs(self, fvgs: list[FVG]) -> str:
+        fresh = [f for f in fvgs[-6:] if str(getattr(f, "status", "")).upper() != "FILLED"]
+        if not fresh:
+            return "WAIT"
+        last = fresh[-1]
+        return "LONG" if last.direction == "BULLISH" else "SHORT"
+
+    def _micro_momentum_side(self, candles: list[Candle]) -> str:
+        if len(candles) < 6:
+            return "WAIT"
+        first = candles[-6].close
+        last = candles[-1].close
+        move = (last - first) / first if first else 0.0
+        if move > 0.00035:
+            return "LONG"
+        if move < -0.00035:
+            return "SHORT"
+        return "WAIT"
+
+    def _directional_close(self, candles: list[Candle], side: str) -> bool:
+        if len(candles) < 2:
+            return False
+        cur = candles[-1]
+        prev = candles[-2]
+        if side == "LONG":
+            return cur.close > cur.open and cur.close > prev.close
+        return cur.close < cur.open and cur.close < prev.close
 
     def _setup_signature(self, d: SetupDecision, fvg: FVG, side: str, confirmation: str | None) -> str:
         return "|".join([
@@ -369,6 +434,8 @@ class FVGSetupEngine:
             return "GAP too new; waiting for retest"
         if age > self.max_fvg_age_bars:
             return f"GAP expired after {age} bars"
+        if age > 32 and str(getattr(fvg, "status", "")).upper() == "ACTIVE":
+            return "focused GAP stale without retest"
         if str(getattr(fvg, "status", "")).upper() == "FILLED":
             return "GAP fully filled before confirmation"
         lo = min(fvg.bottom, fvg.top)
