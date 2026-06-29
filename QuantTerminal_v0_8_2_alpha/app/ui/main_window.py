@@ -98,6 +98,7 @@ class MainWindow(QMainWindow):
         self.signal_box = QTextEdit(); self.signal_box.setReadOnly(True)
         self.timeline_box = QTextEdit(); self.timeline_box.setReadOnly(True)
         self.kalshi_debug_box = QTextEdit(); self.kalshi_debug_box.setReadOnly(True)
+        self.data_health_box = QTextEdit(); self.data_health_box.setReadOnly(True)
         self.backtest_box = QTextEdit(); self.backtest_box.setReadOnly(True)
         self.memory_stats_box = QTextEdit(); self.memory_stats_box.setReadOnly(True)
         self.auto_tune_box = QTextEdit(); self.auto_tune_box.setReadOnly(True)
@@ -188,7 +189,7 @@ class MainWindow(QMainWindow):
         mid = QSplitter(Qt.Horizontal)
         mid.setChildrenCollapsible(False)
         left = self._panel("Watchlist"); left.setMinimumWidth(140); left.setMaximumWidth(360)
-        self.watchlist = QListWidget(); self.watchlist.addItems(["Paper Trading", "Journal", "Signals", "Timeline", "Coach", "Learning", "Memory", "Backtests", "Kalshi", "Logs", "Settings"])
+        self.watchlist = QListWidget(); self.watchlist.addItems(["Paper Trading", "Journal", "Signals", "Timeline", "Coach", "Learning", "Memory", "Backtests", "Data Health", "Kalshi", "Logs", "Settings"])
         self.watchlist.itemClicked.connect(self.on_watchlist_clicked)
         left.layout().addWidget(self.watchlist); mid.addWidget(left)
 
@@ -205,7 +206,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.0: edge filters • Kalshi odds context • smarter exits • stronger replay"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.2: data health • candle hover reads • live payout zones"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -275,6 +276,9 @@ class MainWindow(QMainWindow):
         coach_tab = QWidget(); coach_l = QVBoxLayout(coach_tab)
         coach_l.addWidget(QLabel("Logic Coach — confidence breakdown, safety rules, and setup state"))
         coach_l.addWidget(self.coach_box)
+        data_tab = QWidget(); data_l = QVBoxLayout(data_tab)
+        data_l.addWidget(QLabel("Feed Accuracy / Data Health — warns if Coinbase, candles, Kalshi timer, or odds are stale"))
+        data_l.addWidget(self.data_health_box)
         kalshi_tab = QWidget(); kalshi_l = QVBoxLayout(kalshi_tab)
         apply_kalshi = QPushButton("Sync this Kalshi URL")
         apply_kalshi.clicked.connect(self.apply_kalshi_url)
@@ -290,6 +294,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(learning_tab, "Learning")
         tabs.addTab(memory_tab, "Memory Stats")
         tabs.addTab(backtest_tab, "Backtest / Replay")
+        tabs.addTab(data_tab, "Data Health")
         tabs.addTab(kalshi_tab, "Kalshi Debug")
         tabs.addTab(logs, "Logs")
         root.addWidget(tabs, 0)
@@ -327,6 +332,12 @@ class MainWindow(QMainWindow):
         expired = bool(snap_for_trade.close_time and snap_for_trade.seconds_left() <= 0)
         self.account.update(price, force_close=expired, force_reason="KALSHI_15M_END" if expired else "")
         open_trade = self.account.open_trade
+        if open_trade:
+            risk_cash = float(open_trade.setup_meta.get("cash_stop_loss", self._cash_stop_loss())) if hasattr(open_trade, "setup_meta") else self._cash_stop_loss()
+            payout_cash = float(open_trade.setup_meta.get("cash_payout", self._cash_payout())) if hasattr(open_trade, "setup_meta") else self._cash_payout()
+            self.chart.set_cash_metrics(open_trade.size_usd, risk_cash, payout_cash)
+        else:
+            self.chart.set_cash_metrics(self._cash_size(), self._cash_stop_loss(), self._cash_payout())
         self.chart.set_live_price(price, open_trade.pnl if open_trade else 0.0, open_trade.side if open_trade else "")
         self.capture_closed_trades_for_learning()
 
@@ -394,9 +405,10 @@ class MainWindow(QMainWindow):
             "Learning": 5,
             "Memory": 6,
             "Backtests": 7,
-            "Kalshi": 8,
-            "Logs": 9,
-            "Settings": 8,
+            "Data Health": 8,
+            "Kalshi": 9,
+            "Logs": 10,
+            "Settings": 9,
         }
         if hasattr(self, "tabs") and name in mapping:
             self.tabs.setCurrentIndex(mapping[name])
@@ -413,6 +425,7 @@ class MainWindow(QMainWindow):
         ticker = f" {snap.ticker}" if snap.ticker else ""
         self.timer_label.setText(f"BTC15 {src}: {s//60:02d}:{s%60:02d}{ticker}")
         self.update_kalshi_debug(snap)
+        self.update_data_health_panel(snap)
         # Also close an open paper trade exactly when the BTC15 market ends, even if price is flat.
         if self.latest_price is not None and self.account.open_trade and snap.close_time and snap.seconds_left() <= 0:
             self.account.update(float(self.latest_price), force_close=True, force_reason="KALSHI_15M_END")
@@ -496,7 +509,7 @@ class MainWindow(QMainWindow):
             recommend_line = f"\nRecommend Only: alert this setup, do not auto-paper. Suggested cash plan = {configured_cash_line}."
 
         ai_text = (
-            f"FVG Logic Engine v0.8.0\n\n"
+            f"FVG Logic Engine v0.8.2\n\n"
             f"State\n{getattr(d, 'state', 'UNKNOWN')}\n\n"
             f"Decision\n{('READY ' + d.side) if d.ready else 'WAIT'}\n\n"
             f"Grade / Confidence\n{d.grade} / {d.confidence}%\n\n"
@@ -504,6 +517,7 @@ class MainWindow(QMainWindow):
             f"15m Trend\n{d.trend_15m}\n\n"
             f"5m Trend\n{d.trend_5m}\n\n"
             f"Entry Model\n{getattr(d, 'entry_model', 'FVG')}\n\n"
+            f"Latest Candle Read\n{', '.join(getattr(d, 'candlestick_patterns', [])[:4]) or 'No candle pattern yet'}\n\n"
             f"Training Speed\n{self._training_speed()}\n\n"
             f"Kalshi Odds Context\n{contract_text}\n\n"
             f"Edge Filter\n{edge_text}\n\n"
@@ -558,6 +572,7 @@ class MainWindow(QMainWindow):
             f"Entry Model: {getattr(d, 'entry_model', 'FVG')}\n"
             f"Kalshi Odds Context: {contract_text}\n"
             f"5m Bias: {getattr(d, 'higher_tf_bias', 'WAIT')} | Trigger: {getattr(d, 'trigger_quality', 'Waiting')}\n"
+            f"Latest Candle Read: {', '.join(getattr(d, 'candlestick_patterns', [])[:4]) or 'No pattern yet'}\n"
             f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
             f"Setup Signature: {getattr(d, 'setup_signature', '') or 'None yet'}\n\n"
             "Question Process\n"
@@ -602,6 +617,7 @@ class MainWindow(QMainWindow):
             f"Entry Model: {getattr(d, 'entry_model', 'FVG')}\n"
             f"Kalshi Odds Context: {contract_text}\n"
             f"5m Bias: {getattr(d, 'higher_tf_bias', 'WAIT')} | Trigger: {getattr(d, 'trigger_quality', 'Waiting')}\n"
+            f"Latest Candle Read: {', '.join(getattr(d, 'candlestick_patterns', [])[:4]) or 'No pattern yet'}\n"
             f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
             f"Focused GAP: {getattr(d, 'latest_fvg', 'None')}\n\n"
             "What must happen next\n"
@@ -955,6 +971,76 @@ class MainWindow(QMainWindow):
             notes.append("HOLD / WATCH — no new trades while active")
         return " | ".join(notes)
 
+    def _live_payout_line(self, trade) -> str:
+        try:
+            target_cash = float(trade.setup_meta.get("cash_payout", self._cash_payout()))
+            risk_cash = float(trade.setup_meta.get("cash_stop_loss", self._cash_stop_loss()))
+        except Exception:
+            target_cash = self._cash_payout(); risk_cash = self._cash_stop_loss()
+        pnl = float(getattr(trade, "pnl", 0.0))
+        green_pct = max(0.0, min(100.0, pnl / max(target_cash, 0.01) * 100.0))
+        red_pct = max(0.0, min(100.0, abs(min(0.0, pnl)) / max(risk_cash, 0.01) * 100.0))
+        return f"Live payout ${pnl:,.2f} / +${target_cash:,.2f} target | risk -${risk_cash:,.2f} | target {green_pct:.0f}% / stop {red_pct:.0f}%"
+
+    def _data_freshness_text(self) -> str:
+        now = time.time()
+        tick_at = float(getattr(self.feed, "last_tick_at", 0.0) or 0.0)
+        tick_age = now - tick_at if tick_at else 9999.0
+        last_c = self.candles.candles[-1] if self.candles.candles else None
+        candle_age = now - float(last_c.ts) if last_c else 9999.0
+        source = str(getattr(self.feed, "last_source", "UNKNOWN"))
+        warnings = []
+        if source == "SIM":
+            warnings.append("SIM FEED ACTIVE — not accurate; Coinbase feed failed")
+        if tick_age > 5:
+            warnings.append(f"Live price stale: {tick_age:.1f}s since last tick")
+        if candle_age > 90:
+            warnings.append(f"Last 1m candle bucket is old: {candle_age:.1f}s")
+        if self.latest_price and last_c and abs(float(self.latest_price) - float(last_c.close)) > max(5.0, float(self.latest_price) * 0.001):
+            warnings.append("Live price and last candle close are drifting")
+        return "\n".join("⚠ " + w for w in warnings) if warnings else "✅ Data fresh enough for paper training"
+
+    def update_data_health_panel(self, snap=None) -> None:
+        if not hasattr(self, "data_health_box"):
+            return
+        snap = snap or self.kalshi_timer.snapshot()
+        now = time.time()
+        tick_at = float(getattr(self.feed, "last_tick_at", 0.0) or 0.0)
+        tick_age = now - tick_at if tick_at else 9999.0
+        last_c = self.candles.candles[-1] if self.candles.candles else None
+        candle_age = now - float(last_c.ts) if last_c else 9999.0
+        source = str(getattr(self.feed, "last_source", "UNKNOWN"))
+        kalshi_age = now - float(getattr(snap, "updated_at", 0.0) or 0.0) if getattr(snap, "updated_at", 0.0) else 9999.0
+        text = (
+            "Feed Accuracy / Data Health\n\n"
+            "Candle source: Coinbase Exchange BTC-USD 1m OHLC\n"
+            "Live tick source: Coinbase WebSocket first, Coinbase REST fallback, SIM only if both fail\n"
+            f"Current feed source: {source}\n"
+            f"Last live tick age: {tick_age:.1f}s\n"
+            f"Latest BTC-USD price: ${float(self.latest_price or 0):,.2f}\n"
+            f"1m candles loaded: {len(self.candles.candles)}\n"
+            f"Last candle age: {candle_age:.1f}s\n"
+        )
+        if last_c:
+            direction = "UP/GREEN" if last_c.close >= last_c.open else "DOWN/RED"
+            text += (
+                f"Last candle: {direction} | O {last_c.open:,.2f} H {last_c.high:,.2f} L {last_c.low:,.2f} C {last_c.close:,.2f}\n"
+                "Candle accuracy rule: green if close >= open; red if close < open. Hover any candle for OHLC + pattern read.\n"
+            )
+        text += (
+            "\nKalshi BTC15 context\n"
+            f"Timer source: {snap.source}\n"
+            f"Ticker: {snap.ticker or 'None'}\n"
+            f"Time left: {snap.seconds_left()//60:02d}:{snap.seconds_left()%60:02d}\n"
+            f"Kalshi odds age: {kalshi_age:.1f}s\n"
+            f"Odds: {snap.price_line() if hasattr(snap, 'price_line') else 'unavailable'}\n"
+            f"Last Kalshi error: {snap.last_error or 'None'}\n\n"
+            "Health check\n"
+            f"{self._data_freshness_text()}\n\n"
+            "Accuracy note: chart reading uses Coinbase BTC-USD candles; Kalshi odds/context is layered on top for payout realism."
+        )
+        self._set_text_stable(self.data_health_box, text, "_last_data_health_text")
+
     def update_active_trade_decision(self, price: float) -> None:
         t = self.account.open_trade
         if not t:
@@ -978,7 +1064,7 @@ class MainWindow(QMainWindow):
             f"Now:    {price:,.2f}\n"
             f"Stop:   {t.stop:,.2f}\n"
             f"Target: {t.target:,.2f}\n"
-            f"Live P/L: ${t.pnl:,.2f}\n"
+            f"{self._live_payout_line(t)}\n"
             f"MFE / MAE: ${getattr(t, 'mfe', 0.0):,.2f} / ${getattr(t, 'mae', 0.0):,.2f}\n"
             f"Kalshi odds: {self._kalshi_contract_summary(t.side)}\n"
             f"BTC15 expires: {snap.label()}\n\n"
@@ -1193,6 +1279,9 @@ class MainWindow(QMainWindow):
             "choch_detected": bool(getattr(d, "choch_detected", False)),
             "displacement_detected": bool(getattr(d, "displacement_detected", False)),
             "training_probe": bool(getattr(d, "training_probe", False)),
+            "candlestick_patterns": list(getattr(d, "candlestick_patterns", [])),
+            "candlestick_bias": str(getattr(d, "candlestick_bias", "")),
+            "candlestick_signal": str(getattr(d, "candlestick_signal", "")),
         }
 
     def open_planned_trade(self) -> None:
@@ -1216,6 +1305,7 @@ class MainWindow(QMainWindow):
             )
             if self._planned_gap_key:
                 self._used_gap_keys.add(self._planned_gap_key)
+            self.chart.set_cash_metrics(self._cash_size(), self._cash_stop_loss(), self._cash_payout())
             self.chart.set_plan(str(plan.get("side", "LONG")), float(plan["entry"]), float(plan["stop"]), float(plan["target"]), active=True, mode="trade")
             exp = self.kalshi_timer.snapshot().label()
             self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f} | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} | expires BTC15 {exp}")
@@ -1258,7 +1348,7 @@ class MainWindow(QMainWindow):
         if t:
             self.open_trade_label.setText(
                 f"OPEN {t.direction_label()} | Size ${t.size_usd:,.2f} | Entry {t.entry:,.2f} | "
-                f"Stop {t.stop:,.2f} | Target {t.target:,.2f} | Live P/L ${t.pnl:,.2f}"
+                f"Stop {t.stop:,.2f} | Target {t.target:,.2f} | {self._live_payout_line(t)}"
             )
         else:
             self.open_trade_label.setText("No open paper trade")
@@ -1276,6 +1366,7 @@ class MainWindow(QMainWindow):
         self.update_learning_panel()
         self.update_memory_stats_panel()
         self.update_trade_button_state()
+        self.update_data_health_panel()
 
     def update_audit_panel(self) -> None:
         if not hasattr(self, "audit_box"):
@@ -1417,7 +1508,7 @@ class MainWindow(QMainWindow):
             "Proven setup families\n" + proven + "\n\n"
             "Avoid / blacklist families\n" + blacklist + "\n\n"
             + self.learning.daily_report() + "\n\n"
-            "v0.8.0: edge filters, bad-setup blacklist, daily reports, Kalshi odds context, and stronger replay are active."
+            "v0.8.2: edge filters, candle-pattern hover reads, data health, live payout zones, and stronger replay are active."
         )
         self._set_text_stable(self.memory_stats_box, text, "_last_memory_stats_text")
 

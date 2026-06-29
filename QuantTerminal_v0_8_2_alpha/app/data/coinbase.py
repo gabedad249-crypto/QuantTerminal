@@ -21,6 +21,8 @@ class CoinbaseFeed:
         self._thread: threading.Thread | None = None
         self.last_price: float | None = None
         self.last_source = "INIT"
+        self.last_tick_at = 0.0
+        self.last_error = ""
 
     def start(self) -> None:
         if self._running:
@@ -58,6 +60,8 @@ class CoinbaseFeed:
             with urlopen(f"https://api.exchange.coinbase.com/products/{self.symbol}/ticker", timeout=5) as r:
                 price = float(json.loads(r.read().decode("utf-8"))["price"])
                 self.last_price = price
+                self.last_tick_at = time.time()
+                self.last_source = "REST_TICKER"
                 return price
         except Exception:
             return self.last_price
@@ -87,6 +91,8 @@ class CoinbaseFeed:
             if "price" in data:
                 price = float(data["price"])
                 self.last_price = price
+                self.last_tick_at = time.time()
+                self.last_error = ""
                 self.last_source = "WS"
                 self.on_price(price)
 
@@ -101,10 +107,12 @@ class CoinbaseFeed:
                 with urlopen(f"https://api.exchange.coinbase.com/products/{self.symbol}/ticker", timeout=5) as r:
                     price = float(json.loads(r.read().decode("utf-8"))["price"])
                     self.last_source = "REST"
-            except Exception:
+            except Exception as exc:
                 # Last-resort fake tick only so UI stays alive offline. It is labeled as SIM.
                 price = (self.last_price or 100000.0) + random.uniform(-80, 80)
+                self.last_error = str(exc)
                 self.last_source = "SIM"
             self.last_price = price
+            self.last_tick_at = time.time()
             self.on_price(price)
             time.sleep(1)

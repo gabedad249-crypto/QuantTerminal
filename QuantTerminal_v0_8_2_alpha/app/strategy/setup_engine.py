@@ -4,6 +4,7 @@ import time
 
 from app.strategy.fvg_engine import Candle, FVG, FVGEngine
 from app.data.candles import aggregate_candles
+from app.strategy.candlestick_patterns import detect_candlestick_patterns, strongest_bias
 
 
 @dataclass
@@ -53,6 +54,9 @@ class SetupDecision:
     displacement_detected: bool = False
     trigger_sequence: str = "Waiting"
     training_speed: str = "Balanced"
+    candlestick_patterns: list[str] = field(default_factory=list)
+    candlestick_bias: str = "NEUTRAL"
+    candlestick_signal: str = "No pattern"
 
 
 class FVGSetupEngine:
@@ -179,6 +183,15 @@ class FVGSetupEngine:
             return d
 
         current = candles_1m[-1]
+        latest_patterns = detect_candlestick_patterns(candles_1m[-5:])
+        d.candlestick_patterns = [f"{p.name} ({p.bias}, {p.strength})" for p in latest_patterns]
+        d.candlestick_bias, d.candlestick_signal, _pattern_strength = strongest_bias(candles_1m[-5:])
+        if latest_patterns:
+            d.checklist.append("🕯 Candle read: " + ", ".join(d.candlestick_patterns[:3]))
+            if d.candlestick_bias == "BULLISH":
+                d.confidence_breakdown.append("+4 Bullish candle pattern: " + d.candlestick_signal)
+            elif d.candlestick_bias == "BEARISH":
+                d.confidence_breakdown.append("+4 Bearish candle pattern: " + d.candlestick_signal)
         avg_body = self._avg_body(candles_1m[-45:-5])
         if self.seconds_left is not None and self.seconds_left < self.min_seconds_left:
             d.safety_checks.append(f"❌ BTC15 time: only {self.seconds_left}s left, need {self.min_seconds_left}s+")
@@ -647,6 +660,13 @@ class FVGSetupEngine:
     def _confirmation(self, candles: list[Candle], side: str) -> str | None:
         if len(candles) < 3:
             return None
+        patterns = detect_candlestick_patterns(candles[-5:])
+        wanted = "BULLISH" if side == "LONG" else "BEARISH"
+        # Prefer textbook candle names when they align with the trade direction.
+        for p in patterns:
+            if p.bias == wanted and p.strength >= 62:
+                return p.name
+
         prev = candles[-2]
         cur = candles[-1]
         prev_body_hi = max(prev.open, prev.close)
@@ -687,10 +707,15 @@ class FVGSetupEngine:
         rng = max(cur.high - cur.low, 0.0001)
         body_ok = body >= max(avg_body * 0.55, rng * 0.35)
         mid = (min(fvg.bottom, fvg.top) + max(fvg.bottom, fvg.top)) / 2.0
+        bias, name, strength = strongest_bias(candles[-5:])
         if side == "LONG":
+            if bias == "BULLISH" and strength >= 48 and cur.close >= mid:
+                return f"Bullish Candle Confirm: {name}"
             if cur.close > cur.open and body_ok and cur.close >= mid:
                 return "Bullish Momentum Confirm"
         else:
+            if bias == "BEARISH" and strength >= 48 and cur.close <= mid:
+                return f"Bearish Candle Confirm: {name}"
             if cur.close < cur.open and body_ok and cur.close <= mid:
                 return "Bearish Momentum Confirm"
         return None

@@ -7,6 +7,7 @@ import time
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
 
 from app.strategy.fvg_engine import Candle, FVG, FVGEngine
+from app.strategy.candlestick_patterns import detect_candlestick_patterns
 
 
 class ChartWidget(QGraphicsView):
@@ -72,6 +73,9 @@ class ChartWidget(QGraphicsView):
         self.live_price: float | None = None
         self.live_pnl: float = 0.0
         self.live_trade_status: str = ""
+        self.cash_size_usd: float = 0.0
+        self.cash_risk_usd: float = 0.0
+        self.cash_payout_usd: float = 0.0
 
     # ---------- public API used by MainWindow ----------
     def set_candles(self, candles: list[Candle]) -> None:
@@ -86,6 +90,12 @@ class ChartWidget(QGraphicsView):
 
     def _fvg_key(self, fvg: FVG) -> str:
         return f"{fvg.direction}:{int(fvg.end_ts)}:{round(fvg.top, 2)}:{round(fvg.bottom, 2)}"
+
+    def set_cash_metrics(self, size_usd: float = 0.0, risk_usd: float = 0.0, payout_usd: float = 0.0) -> None:
+        self.cash_size_usd = float(size_usd or 0.0)
+        self.cash_risk_usd = float(risk_usd or 0.0)
+        self.cash_payout_usd = float(payout_usd or 0.0)
+        self._redraw()
 
     def set_live_price(self, price: float, pnl: float = 0.0, status: str = "") -> None:
         self.live_price = float(price)
@@ -375,27 +385,46 @@ class ChartWidget(QGraphicsView):
             return
         side = str(self.trade_plan.get("side", "LONG"))
         mode = str(self.trade_plan.get("mode") or "plan")
-        entry_label = "ENTRY" if mode == "trade" else "BUY-IN"
-        vals = [("target", float(target), "#2563eb", "TARGET"), ("entry", float(entry), "#e5e7eb", entry_label), ("stop", float(stop), "#dc2626", "STOP")]
-        offscreen = []
-        for key, price, color, label in vals:
-            raw_y = self._y(price)
+        entry = float(entry); stop = float(stop); target = float(target)
+
+        y_entry_raw = self._y(entry)
+        y_stop_raw = self._y(stop)
+        y_target_raw = self._y(target)
+        y_entry = max(self._plot.top() + 2, min(self._plot.bottom() - 2, y_entry_raw))
+        y_stop = max(self._plot.top() + 2, min(self._plot.bottom() - 2, y_stop_raw))
+        y_target = max(self._plot.top() + 2, min(self._plot.bottom() - 2, y_target_raw))
+
+        # Transparent risk/reward zones meet at the buy-in line. Lines that are
+        # far off screen are pinned to the top/bottom edge so target/stop never
+        # crush the candles or disappear.
+        green = QColor("#22c55e"); green.setAlpha(34)
+        red = QColor("#ef4444"); red.setAlpha(34)
+        self.scene.addRect(QRectF(self._plot.left(), min(y_entry, y_target), self._plot.width(), max(2, abs(y_target - y_entry))), QPen(Qt.NoPen), QBrush(green))
+        self.scene.addRect(QRectF(self._plot.left(), min(y_entry, y_stop), self._plot.width(), max(2, abs(y_stop - y_entry))), QPen(Qt.NoPen), QBrush(red))
+
+        def line(key: str, raw_y: float, y: float, price: float, color: str, label: str, cash: str = "") -> None:
             visible = self._plot.top() <= raw_y <= self._plot.bottom()
-            y = max(self._plot.top() + 4, min(self._plot.bottom() - 4, raw_y))
-            pen = QPen(QColor(color), 2 if key == self.drag_line else 1.4)
-            if visible:
-                self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
-                self.scene.addRect(self._plot.right() - 92, y - 11, 88, 22, QPen(QColor(color), 1), QBrush(QColor("#111827")))
-                self._text(self._plot.right() - 88, y - 8, f"{label} {price:,.0f}", color, 8)
-            else:
-                arrow = "↑" if raw_y < self._plot.top() else "↓"
-                offscreen.append(f"{label} {arrow} {price:,.0f}")
-                self.scene.addRect(self._plot.right() - 104, y - 10, 100, 20, QPen(QColor(color), 1), QBrush(QColor("#111827")))
-                self._text(self._plot.right() - 100, y - 7, f"{label} {arrow}", color, 8)
+            pen = QPen(QColor(color), 2.4 if key == self.drag_line else 1.6, Qt.SolidLine if visible else Qt.DashLine)
+            self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
+            arrow = "" if visible else (" ↑" if raw_y < self._plot.top() else " ↓")
+            label_text = f"{label}{arrow} {price:,.2f}"
+            if cash:
+                label_text += f"  {cash}"
+            width = min(220, 16 + len(label_text) * 7)
+            self.scene.addRect(self._plot.right() - width - 4, y - 12, width, 24, QPen(QColor(color), 1), QBrush(QColor("#111827")))
+            self._text(self._plot.right() - width + 2, y - 9, label_text, color, 8)
+
+        entry_label = "ENTRY" if mode == "trade" else "BUY-IN"
+        payout_cash = f"+${self.cash_payout_usd:,.2f}" if self.cash_payout_usd else ""
+        risk_cash = f"-${self.cash_risk_usd:,.2f}" if self.cash_risk_usd else ""
+        line("target", y_target_raw, y_target, target, "#22c55e", "TARGET", payout_cash)
+        line("entry", y_entry_raw, y_entry, entry, "#e5e7eb", entry_label, f"${self.cash_size_usd:,.2f}" if self.cash_size_usd else "")
+        line("stop", y_stop_raw, y_stop, stop, "#ef4444", "STOP", risk_cash)
+
         rr = float(self.trade_plan.get("rr") or 0)
         title = "OPEN PAPER TRADE" if mode == "trade" else "AUTO PLAN"
-        extra = "" if not offscreen else " • far line clipped"
-        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • RR {rr:.2f}:1{extra}", "#d1d5db", 10)
+        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • Ratio {rr:.2f}:1 • green=target red=stop", "#d1d5db", 10)
+
 
 
     def _draw_live_price(self) -> None:
@@ -413,6 +442,57 @@ class ChartWidget(QGraphicsView):
         self.scene.addRect(self._plot.left() + 8, y - 12, min(360, 12 + len(label) * 7), 24, QPen(QColor("#64748b"), 1), QBrush(QColor("#111827")))
         self._text(self._plot.left() + 14, y - 9, label, "#e5e7eb", 8)
 
+
+    def _hover_candle_info(self) -> tuple[Candle | None, int]:
+        if not self.hover_scene:
+            return None, -1
+        candles, global_start, _ = self._visible()
+        if not candles or not self._plot.contains(self.hover_scene.x(), self.hover_scene.y()):
+            return None, -1
+        step = self._plot.width() / max(1, len(candles))
+        idx = int((self.hover_scene.x() - self._plot.left()) / max(1, step))
+        idx = max(0, min(len(candles) - 1, idx))
+        return candles[idx], global_start + idx
+
+    def _draw_candle_hover_card(self, x: float, y: float) -> None:
+        candle, global_idx = self._hover_candle_info()
+        if not candle:
+            return
+        # Use all candles up to the hovered candle so finished candles are read
+        # based on their own context, not only the current live candle.
+        history = self.candles[:global_idx + 1]
+        patterns = detect_candlestick_patterns(history[-8:])
+        direction = "UP/GREEN" if candle.close >= candle.open else "DOWN/RED"
+        body = abs(candle.close - candle.open)
+        rng = max(candle.high - candle.low, 0.000001)
+        upper = candle.high - max(candle.open, candle.close)
+        lower = min(candle.open, candle.close) - candle.low
+        lines = [
+            f"Candle #{global_idx + 1}  {direction}",
+            f"O {candle.open:,.2f}  H {candle.high:,.2f}",
+            f"L {candle.low:,.2f}  C {candle.close:,.2f}",
+            f"Body {body:,.2f}  Range {rng:,.2f}",
+            f"Upper wick {upper:,.2f}  Lower wick {lower:,.2f}",
+        ]
+        if patterns:
+            lines.append("Pattern read:")
+            for p in patterns[:3]:
+                lines.append(f"• {p.name} [{p.bias}] {p.strength}/100")
+        text_w = 300
+        text_h = 18 * len(lines) + 14
+        card_x = x + 14
+        card_y = y + 14
+        if card_x + text_w > self._plot.right():
+            card_x = x - text_w - 14
+        if card_y + text_h > self._plot.bottom():
+            card_y = y - text_h - 14
+        card_x = max(self._plot.left() + 4, card_x)
+        card_y = max(self._plot.top() + 4, card_y)
+        self.scene.addRect(card_x, card_y, text_w, text_h, QPen(QColor("#334155"), 1), QBrush(QColor("#0f172a")))
+        for i, line in enumerate(lines):
+            color = "#f8fafc" if i == 0 else ("#cbd5e1" if not line.startswith("•") else "#93c5fd")
+            self._text(card_x + 10, card_y + 6 + i * 18, line, color, 8)
+
     def _draw_crosshair(self) -> None:
         if not self.hover_scene:
             return
@@ -426,6 +506,7 @@ class ChartWidget(QGraphicsView):
         price = self._price_from_scene_y(y)
         self.scene.addRect(self._plot.right() - 88, y - 10, 84, 20, QPen(QColor("#64748b"), 1), QBrush(QColor("#0f172a")))
         self._text(self._plot.right() - 82, y - 7, f"{price:,.2f}", "#cbd5e1", 8)
+        self._draw_candle_hover_card(x, y)
 
     def _text(self, x: float, y: float, text: str, color: str, size: int = 10) -> None:
         item = self.scene.addText(text, QFont("Segoe UI", size))
