@@ -1,8 +1,8 @@
-# Quant Terminal v0.8.3 Alpha
+# Quant Terminal v0.8.3.1 Alpha
 
 Paper-training BTC15 research terminal.
 
-## v0.8.3 changes
+## v0.8.3.1 changes
 
 - Live payout/P&L updates are refreshed directly from the open paper trade every tick.
 - Paper Trading tab now shows a clear OPEN TRADE ACTIVE indicator.
@@ -31,3 +31,7 @@ git add .
 git commit -m "Fix live payout hover zones and saved paper settings"
 git push
 ```
+
+
+## v0.8.3.1 Hotfix
+- Fixed startup crash from saved_ui loading after UI widgets used it.

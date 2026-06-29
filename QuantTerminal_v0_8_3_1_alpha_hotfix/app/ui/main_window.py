@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
         self.timeline_box = QTextEdit(); self.timeline_box.setReadOnly(True)
         self.kalshi_debug_box = QTextEdit(); self.kalshi_debug_box.setReadOnly(True)
         self.data_health_box = QTextEdit(); self.data_health_box.setReadOnly(True)
+        saved_ui = self._load_trading_ui_settings()
         self.backtest_box = QTextEdit(); self.backtest_box.setReadOnly(True)
         self.memory_stats_box = QTextEdit(); self.memory_stats_box.setReadOnly(True)
         self.auto_tune_box = QTextEdit(); self.auto_tune_box.setReadOnly(True)
@@ -116,7 +117,6 @@ class MainWindow(QMainWindow):
         self.training_speed_box = QComboBox(); self.training_speed_box.addItems(["More Trades", "Strict Quality", "Max Training Data"]); self.training_speed_box.setCurrentText(str(saved_ui.get("training_speed", "More Trades")))
         self.kalshi_url_box = QLineEdit(settings.get("kalshi_market_url", "https://kalshi.com/category/crypto/btc?frequency=fifteen_min"))
         self.kalshi_url_box.setPlaceholderText("Paste Kalshi BTC15 market URL")
-        saved_ui = self._load_trading_ui_settings()
 
         self.side_box = QComboBox(); self.side_box.addItems(["LONG", "SHORT"])
         self.size_box = NoWheelDoubleSpinBox(); self.size_box.setRange(1, 100000); self.size_box.setDecimals(2); self.size_box.setSingleStep(1); self.size_box.setValue(float(saved_ui.get("buy_in_usd", 20.00))); self.size_box.setPrefix("$")
