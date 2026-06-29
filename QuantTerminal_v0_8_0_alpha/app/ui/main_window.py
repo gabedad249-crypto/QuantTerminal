@@ -205,7 +205,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.7.4: trade frequency control • scout probes • CHoCH/FVG training"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.0: edge filters • Kalshi odds context • smarter exits • stronger replay"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -484,12 +484,14 @@ class MainWindow(QMainWindow):
         safety = "\n".join(getattr(d, "safety_checks", [])[-8:]) or "Safety checks pending"
         sim = self.learning.similarity(d)
         sim_text = f"{sim['matches']} matches | {sim['win_rate']:.1f}% WR | avg ${sim['avg_pnl']:.2f} | score {sim['score']}/100 | {sim['label']}"
+        edge_text = self._edge_filter_summary(d)
+        contract_text = self._kalshi_contract_summary(getattr(d, "side", ""))
         recommend_line = ""
         if hasattr(self, "mode_box") and self.mode_box.currentText().startswith("Recommend") and d.ready:
             recommend_line = f"\nRecommend Only: alert this setup, do not auto-paper. Suggested cash plan = {configured_cash_line}."
 
         ai_text = (
-            f"FVG Logic Engine v0.7.4\n\n"
+            f"FVG Logic Engine v0.8.0\n\n"
             f"State\n{getattr(d, 'state', 'UNKNOWN')}\n\n"
             f"Decision\n{('READY ' + d.side) if d.ready else 'WAIT'}\n\n"
             f"Grade / Confidence\n{d.grade} / {d.confidence}%\n\n"
@@ -498,6 +500,8 @@ class MainWindow(QMainWindow):
             f"5m Trend\n{d.trend_5m}\n\n"
             f"Entry Model\n{getattr(d, 'entry_model', 'FVG')}\n\n"
             f"Training Speed\n{self._training_speed()}\n\n"
+            f"Kalshi Odds Context\n{contract_text}\n\n"
+            f"Edge Filter\n{edge_text}\n\n"
             f"5m Bias\n{getattr(d, 'higher_tf_bias', 'WAIT')}\n\n"
             f"Trigger Quality\n{getattr(d, 'trigger_quality', 'Waiting')} {'(paper probe)' if getattr(d, 'training_probe', False) else ''}\n\n"
             f"Session\n{getattr(d, 'session_label', 'Unknown')}\n\n"
@@ -527,6 +531,8 @@ class MainWindow(QMainWindow):
         breakdown = getattr(d, "confidence_breakdown", []) or ["No score yet"]
         safety = getattr(d, "safety_checks", []) or ["Safety checks pending"]
         sim = self.learning.similarity(d)
+        edge_text = self._edge_filter_summary(d)
+        contract_text = self._kalshi_contract_summary(getattr(d, "side", ""))
         self._update_configured_rr_label()
         configured_cash_line = self._configured_cash_summary()
         plan = "No buy-in yet"
@@ -545,6 +551,7 @@ class MainWindow(QMainWindow):
             f"{timer_line}\n\n"
             f"Current State: {getattr(d, 'state', 'UNKNOWN')}\n"
             f"Entry Model: {getattr(d, 'entry_model', 'FVG')}\n"
+            f"Kalshi Odds Context: {contract_text}\n"
             f"5m Bias: {getattr(d, 'higher_tf_bias', 'WAIT')} | Trigger: {getattr(d, 'trigger_quality', 'Waiting')}\n"
             f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
             f"Setup Signature: {getattr(d, 'setup_signature', '') or 'None yet'}\n\n"
@@ -559,8 +566,9 @@ class MainWindow(QMainWindow):
             "Live Checklist\n" + "\n".join(checklist[-12:]) + "\n\n"
             "Confidence Breakdown\n" + "\n".join(breakdown[-12:]) + "\n\n"
             "Safety\n" + "\n".join(safety[-10:]) + "\n\n"
-            "Memory\n"
-            f"{sim['matches']} similar | WR {sim['win_rate']:.1f}% | score {sim['score']}/100 | {sim['label']}\n\n"
+            "Memory / Edge Filter\n"
+            f"{sim['matches']} similar | WR {sim['win_rate']:.1f}% | score {sim['score']}/100 | {sim['label']}\n"
+            f"{edge_text}\n\n"
             "Configured Cash RR\n" + configured_cash_line + "\n\n"
             "Why waiting / why ready\n" + "\n".join("• " + r for r in reasons[-8:]) + "\n\n"
             "Trade Plan\n" + plan
@@ -571,6 +579,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "coach_box"):
             return
         sim = self.learning.similarity(d) if d else {"matches": 0, "win_rate": 0, "avg_pnl": 0, "score": 0, "label": "No setup"}
+        edge_text = self._edge_filter_summary(d) if d else "Edge filter waiting for setup"
+        contract_text = self._kalshi_contract_summary(getattr(d, "side", "") if d else "")
         clusters = self.learning.clusters(limit=6) if hasattr(self.learning, "clusters") else []
         cluster_text = "\n".join(
             f"• {c['cluster']} | {c['trades']} trades | WR {c['win_rate']:.1f}% | avg ${c['avg_pnl']:.2f}"
@@ -585,6 +595,7 @@ class MainWindow(QMainWindow):
             f"Confidence: {getattr(d, 'confidence', 0)}%\n"
             f"Session: {getattr(d, 'session_label', 'Unknown')}\n"
             f"Entry Model: {getattr(d, 'entry_model', 'FVG')}\n"
+            f"Kalshi Odds Context: {contract_text}\n"
             f"5m Bias: {getattr(d, 'higher_tf_bias', 'WAIT')} | Trigger: {getattr(d, 'trigger_quality', 'Waiting')}\n"
             f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
             f"Focused GAP: {getattr(d, 'latest_fvg', 'None')}\n\n"
@@ -773,6 +784,42 @@ class MainWindow(QMainWindow):
             f"moves {m['stop_pct']:.3f}% / {m['payout_pct']:.3f}%"
         )
 
+
+    def _kalshi_contract_summary(self, side: str | None = None) -> str:
+        snap = self.kalshi_timer.snapshot()
+        base = snap.price_line() if hasattr(snap, "price_line") else "contract prices unavailable"
+        spread = snap.spread_cents() if hasattr(snap, "spread_cents") else None
+        quality = "unknown"
+        if spread is not None:
+            quality = "good" if spread <= 4 else ("ok" if spread <= 8 else "wide")
+        side_price = None
+        if side and hasattr(snap, "side_entry_cents"):
+            side_price = snap.side_entry_cents(side)
+        side_txt = ""
+        if side_price is not None:
+            side_txt = f" | estimated {side} entry {side_price}¢"
+        vol_txt = ""
+        if getattr(snap, "volume", None) is not None:
+            vol_txt += f" | vol {snap.volume}"
+        if getattr(snap, "liquidity", None) is not None:
+            vol_txt += f" | liq {snap.liquidity}"
+        return f"{base}{side_txt}{vol_txt} | spread quality {quality}"
+
+    def _edge_filter_summary(self, d=None) -> str:
+        try:
+            edge = self.learning.edge_profile(d)
+            blocked = "BLOCK" if edge.get("blocked") else "PASS"
+            sim = edge.get("similarity", {}) or {}
+            return (
+                f"Edge filter: {blocked}\n"
+                f"Decision cluster: {edge.get('decision_cluster') or 'None yet'}\n"
+                f"Similar memory: {sim.get('matches',0)} matches | WR {float(sim.get('win_rate',0)):.1f}% | "
+                f"avg ${float(sim.get('avg_pnl',0)):.2f} | score {int(sim.get('score',0))}/100\n"
+                f"Block reason: {edge.get('block_reason') or 'None'}"
+            )
+        except Exception as exc:
+            return f"Edge filter unavailable: {exc}"
+
     def _update_ratio_label(self, side: str | None = None, entry: float | None = None, stop: float | None = None, target: float | None = None) -> None:
         if not hasattr(self, "plan_rr_label"):
             return
@@ -881,18 +928,27 @@ class MainWindow(QMainWindow):
         if trade.side == "LONG":
             target_dist = max(0.0, trade.target - price)
             stop_dist = max(0.0, price - trade.stop)
+            progress = (price - trade.entry) / max(trade.target - trade.entry, 0.0001)
         else:
             target_dist = max(0.0, price - trade.target)
             stop_dist = max(0.0, trade.stop - price)
+            progress = (trade.entry - price) / max(trade.entry - trade.target, 0.0001)
         total = max(target_dist + stop_dist, 0.0001)
         danger = stop_dist / total
-        if seconds_left < 45:
-            return "EXPIRY SOON — watching BTC15 close"
-        if danger < 0.25:
-            return "DANGER — price is near stop"
-        if target_dist / total < 0.25:
-            return "NEAR TARGET — let exit rules work"
-        return "HOLD / WATCH — no new trades"
+        notes = []
+        if seconds_left < 30:
+            notes.append("EXPIRY SOON — BTC15 close will force exit")
+        elif seconds_left < 75:
+            notes.append("TIME WARNING — be picky; market ends soon")
+        if progress >= 0.80:
+            notes.append("NEAR FULL PAYOUT — target almost hit")
+        elif progress >= 0.50:
+            notes.append("GREEN HALF WAY — breakeven idea is reasonable in real coach mode")
+        if danger < 0.20:
+            notes.append("DANGER — price is close to stop")
+        if not notes:
+            notes.append("HOLD / WATCH — no new trades while active")
+        return " | ".join(notes)
 
     def update_active_trade_decision(self, price: float) -> None:
         t = self.account.open_trade
@@ -918,6 +974,8 @@ class MainWindow(QMainWindow):
             f"Stop:   {t.stop:,.2f}\n"
             f"Target: {t.target:,.2f}\n"
             f"Live P/L: ${t.pnl:,.2f}\n"
+            f"MFE / MAE: ${getattr(t, 'mfe', 0.0):,.2f} / ${getattr(t, 'mae', 0.0):,.2f}\n"
+            f"Kalshi odds: {self._kalshi_contract_summary(t.side)}\n"
             f"BTC15 expires: {snap.label()}\n\n"
             f"Distance to target: {dist_target:,.2f}\n"
             f"Distance to stop:   {dist_stop:,.2f}\n\n"
@@ -925,7 +983,8 @@ class MainWindow(QMainWindow):
             "Exit rules:\n"
             "• Target hit = win.\n"
             "• Stop hit = loss.\n"
-            "• BTC15 timer ends = close trade at current price."
+            "• BTC15 timer ends = close trade at current price.\n"
+            "• v0.8 manager labels danger / breakeven idea / near-payout, but does not fake-close early."
         )
         self._set_text_stable(self.ai_box, text, "_last_ai_text")
         self._set_text_stable(self.thinking_box, text, "_last_thinking_text")
@@ -958,6 +1017,19 @@ class MainWindow(QMainWindow):
                 self.chart.clear_plan()
                 self._last_auto_plan_sig = ""
                 self._planned_gap_key = ""
+            return
+
+        # Learned edge filter: after enough paper results, automatically block setup families
+        # that keep losing. Max Training Data can still collect scout samples.
+        blocked, block_reason = self.learning.should_block_decision(d) if hasattr(self.learning, "should_block_decision") else (False, "")
+        if blocked and not self._training_speed().startswith("Max"):
+            if self.chart.trade_plan.get("active"):
+                self.chart.clear_plan()
+            self.log_timeline(f"BLOCK | Learned bad setup family | {block_reason}")
+            if log_sig := f"BLOCK:{gap_key}:{block_reason}":
+                if log_sig != self._last_auto_log_sig:
+                    self._last_auto_log_sig = log_sig
+                    self.log_signal(f"BLOCKED SETUP | {block_reason}")
             return
 
         # One focused GAP at a time: once a GAP has produced a plan/trade, do not
@@ -1082,6 +1154,10 @@ class MainWindow(QMainWindow):
         if not d:
             return {}
         snap = self.kalshi_timer.snapshot()
+        contract_snap = self.kalshi_timer.snapshot()
+        side = str(getattr(d, "side", ""))
+        side_price = contract_snap.side_entry_cents(side) if hasattr(contract_snap, "side_entry_cents") else None
+        spread = contract_snap.spread_cents() if hasattr(contract_snap, "spread_cents") else None
         return {
             "state": str(getattr(d, "state", "")),
             "side": str(getattr(d, "side", "")),
@@ -1094,6 +1170,10 @@ class MainWindow(QMainWindow):
             "active_fvg_status": str(getattr(d, "active_fvg_status", "")),
             "session_label": str(getattr(d, "session_label", "")),
             "time_left_seconds": int(snap.seconds_left()),
+            "kalshi_ticker": str(getattr(contract_snap, "ticker", "")),
+            "contract_price_line": contract_snap.price_line() if hasattr(contract_snap, "price_line") else "",
+            "contract_side_price_cents": side_price,
+            "contract_spread_cents": spread,
             "impulse_score": int(getattr(d, "impulse_score", 0)),
             "fvg_quality_score": int(getattr(d, "fvg_quality_score", 0)),
             "cash_buy_in": self._cash_size(),
@@ -1304,10 +1384,19 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "memory_stats_box"):
             return
         stats = self.learning.stats()
+        edge = self.learning.edge_profile(self.last_decision) if hasattr(self.learning, "edge_profile") else {}
         closed = [t for t in self.account.trades if t.status == "CLOSED"]
         total_pnl = sum(t.pnl for t in closed)
         best = max((t.pnl for t in closed), default=0.0)
         worst = min((t.pnl for t in closed), default=0.0)
+        blacklist = "\n".join(
+            f"• {c['cluster']} | {c['trades']} trades | WR {c['win_rate']:.1f}% | avg ${c['avg_pnl']:.2f}"
+            for c in edge.get("blacklisted", [])[:6]
+        ) or "No avoid-list setup families yet."
+        proven = "\n".join(
+            f"• {c['cluster']} | {c['trades']} trades | WR {c['win_rate']:.1f}% | avg ${c['avg_pnl']:.2f}"
+            for c in edge.get("best", [])[:6]
+        ) or "No proven setup families yet."
         text = (
             "Memory / Edge Stats\n\n"
             f"Learning: {'ON' if stats.get('enabled') else 'OFF'}\n"
@@ -1320,7 +1409,10 @@ class MainWindow(QMainWindow):
             f"Session P/L: ${total_pnl:,.2f}\n"
             f"Best trade: ${best:,.2f}\n"
             f"Worst trade: ${worst:,.2f}\n\n"
-            "v0.7.4: trade frequency control, scout probes, CHoCH/FVG model, and guardrailed auto-tune are active."
+            "Proven setup families\n" + proven + "\n\n"
+            "Avoid / blacklist families\n" + blacklist + "\n\n"
+            + self.learning.daily_report() + "\n\n"
+            "v0.8.0: edge filters, bad-setup blacklist, daily reports, Kalshi odds context, and stronger replay are active."
         )
         self._set_text_stable(self.memory_stats_box, text, "_last_memory_stats_text")
 
@@ -1329,44 +1421,90 @@ class MainWindow(QMainWindow):
         if len(candles) < 90:
             self._set_text_stable(self.backtest_box, "Need at least 90 one-minute candles before replay backtest can run.", "_last_backtest_text")
             return
+        # Stronger walk-forward replay: no future candles in decisions, one open trade max,
+        # exit by stop/target or synthetic BTC15 candle boundary.
+        engine = FVGSetupEngine(min_rr=float(self.min_rr_box.value()))
+        engine.training_speed = self._training_speed()
+        try:
+            engine._apply_training_speed()
+        except Exception:
+            pass
         wins = losses = trades = 0
         total_pnl = 0.0
-        lines = ["FVG Replay Backtest", "No future candles are shown to the engine during decisions.", ""]
-        # Lightweight replay: evaluate one candle at a time and simulate a single open trade.
+        peak = 0.0
+        max_drawdown = 0.0
+        gross_win = 0.0
+        gross_loss = 0.0
         open_trade = None
+        used_gap_keys = set()
+        by_side = {"LONG": {"trades":0,"wins":0,"pnl":0.0}, "SHORT": {"trades":0,"wins":0,"pnl":0.0}}
+        by_grade = {}
+        lines = ["Walk-forward Replay Backtest", "No future candles are shown to the engine during decisions.", "One open trade max, exits by stop/target/BTC15 boundary.", ""]
         for i in range(60, len(candles)):
             visible = candles[:i+1]
-            price = visible[-1].close
+            c = visible[-1]
+            price = c.close
+            seconds_left = 900 - (int(c.ts) % 900)
             if open_trade:
-                side, entry, stop, target, size = open_trade
+                side, entry, stop, target, size, grade, open_bucket = open_trade
                 if side == "LONG":
                     hit_stop = price <= stop; hit_target = price >= target
                     pnl = (price - entry) / entry * size
                 else:
                     hit_stop = price >= stop; hit_target = price <= target
                     pnl = (entry - price) / entry * size
-                if hit_stop or hit_target:
+                expired = int(c.ts) // 900 != open_bucket
+                if hit_stop or hit_target or expired:
                     trades += 1
                     total_pnl += pnl
-                    if hit_target or pnl > 0:
-                        wins += 1
+                    peak = max(peak, total_pnl)
+                    max_drawdown = min(max_drawdown, total_pnl - peak)
+                    win = bool(hit_target or pnl > 0)
+                    if win:
+                        wins += 1; gross_win += max(0.0, pnl)
                     else:
-                        losses += 1
-                    lines.append(f"#{trades:03d} {'WIN' if (hit_target or pnl > 0) else 'LOSS'} {side} exit {price:,.2f} P/L ${pnl:.2f}")
+                        losses += 1; gross_loss += abs(min(0.0, pnl))
+                    by_side.setdefault(side, {"trades":0,"wins":0,"pnl":0.0})
+                    by_side[side]["trades"] += 1; by_side[side]["wins"] += 1 if win else 0; by_side[side]["pnl"] += pnl
+                    by_grade.setdefault(grade, {"trades":0,"wins":0,"pnl":0.0})
+                    by_grade[grade]["trades"] += 1; by_grade[grade]["wins"] += 1 if win else 0; by_grade[grade]["pnl"] += pnl
+                    reason = "TARGET" if hit_target else ("STOP" if hit_stop else "BTC15_END")
+                    lines.append(f"#{trades:03d} {'WIN' if win else 'LOSS'} {side} {grade} via {reason} exit {price:,.2f} P/L ${pnl:.2f}")
                     open_trade = None
                 continue
-            d = self.setup_engine.evaluate(visible)
+            engine.configure_context(used_gap_keys, seconds_left, self._training_speed())
+            d = engine.evaluate(visible)
+            blocked, _reason = self.learning.should_block_decision(d) if hasattr(self.learning, "should_block_decision") else (False, "")
+            if blocked and not self._training_speed().startswith("Max"):
+                continue
             if d.ready and d.plan:
-                open_trade = (d.plan.side, d.plan.entry, d.plan.stop, d.plan.target, 1000.0)
+                used_gap_keys.add(getattr(d, "active_fvg_key", ""))
+                open_trade = (d.plan.side, d.plan.entry, d.plan.stop, d.plan.target, self._cash_size(), d.grade, int(c.ts)//900)
         win_rate = (wins / trades * 100) if trades else 0.0
+        profit_factor = (gross_win / gross_loss) if gross_loss else (gross_win if gross_win else 0.0)
+        side_lines = []
+        for side, row in by_side.items():
+            if row["trades"]:
+                side_lines.append(f"{side}: {row['trades']} trades | WR {row['wins']/row['trades']*100:.1f}% | P/L ${row['pnl']:.2f}")
+        grade_lines = []
+        for grade, row in sorted(by_grade.items()):
+            grade_lines.append(f"{grade}: {row['trades']} trades | WR {row['wins']/row['trades']*100:.1f}% | P/L ${row['pnl']:.2f}")
         summary = [
             f"Trades: {trades}",
             f"Wins/Losses: {wins}/{losses}",
             f"Win rate: {win_rate:.1f}%",
-            f"Paper P/L on $1,000 test size: ${total_pnl:,.2f}",
+            f"Paper P/L on configured size: ${total_pnl:,.2f}",
+            f"Profit factor: {profit_factor:.2f}",
+            f"Max drawdown: ${abs(max_drawdown):,.2f}",
+            "",
+            "By side",
+            *(side_lines or ["No side stats yet"]),
+            "",
+            "By grade",
+            *(grade_lines or ["No grade stats yet"]),
             "",
         ]
-        self._set_text_stable(self.backtest_box, "\n".join(summary + lines[-80:]), "_last_backtest_text")
+        self._set_text_stable(self.backtest_box, "\n".join(summary + lines[-120:]), "_last_backtest_text")
 
     def export_paper_report(self) -> None:
         from pathlib import Path
@@ -1427,6 +1565,7 @@ class MainWindow(QMainWindow):
             f"Close time: {close}\n"
             f"Time left: {snap.seconds_left()//60:02d}:{snap.seconds_left()%60:02d}\n"
             f"Candidates found: {getattr(snap, 'candidate_count', 0)}\n"
+            f"Contract prices: {snap.price_line() if hasattr(snap, 'price_line') else 'unavailable'}\n"
             f"Updated: {updated}\n"
             f"Last error: {snap.last_error or 'None'}\n\n"
             "Timer sources:\n"

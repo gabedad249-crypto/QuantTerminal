@@ -92,6 +92,10 @@ class LearningMemory:
             "rr": getattr(trade, "rr", 0.0),
             "size_usd": getattr(trade, "size_usd", 0.0),
             "duration_sec": (float(getattr(trade, "closed_at", 0) or 0) - float(getattr(trade, "opened_at", 0) or 0)) if getattr(trade, "closed_at", None) else 0,
+            "mfe": getattr(trade, "mfe", 0.0),
+            "mae": getattr(trade, "mae", 0.0),
+            "contract_side_price_cents": meta.get("contract_side_price_cents"),
+            "contract_spread_cents": meta.get("contract_spread_cents"),
             "cluster": self._cluster_from_trade(trade),
             "setup_meta": meta,
             "state_at_entry": meta.get("state", ""),
@@ -250,11 +254,110 @@ class LearningMemory:
             "avg_pnl": avg,
         }
 
+
+    def edge_profile(self, decision: Any | None = None) -> dict[str, Any]:
+        """Summarize learned edge, blacklists, and best setup families.
+
+        This is intentionally conservative. A setup is not blacklisted until it
+        has at least 10 outcomes and weak performance. Recommend Only can use
+        this as a coach filter instead of blindly trusting every FVG.
+        """
+        outcomes = self._read_jsonl(self.outcomes_path)
+        clusters = self.clusters(limit=999)
+        blacklisted = []
+        best = []
+        for c in clusters:
+            trades = int(c.get("trades", 0))
+            wr = float(c.get("win_rate", 0.0))
+            avg = float(c.get("avg_pnl", 0.0))
+            if trades >= 10 and (wr < 42.0 or avg < -0.05):
+                blacklisted.append(c)
+            if trades >= 10 and wr >= 58.0 and avg > 0:
+                best.append(c)
+        sim = self.similarity(decision) if decision is not None else {"matches":0,"win_rate":0,"avg_pnl":0,"score":0,"label":"No active setup"}
+        decision_cluster = self._cluster_from_decision(decision) if decision is not None else ""
+        blocked = False
+        block_reason = ""
+        for b in blacklisted:
+            bc = str(b.get("cluster", ""))
+            if decision_cluster and (decision_cluster in bc or bc in decision_cluster):
+                blocked = True
+                block_reason = f"Cluster has underperformed: {bc} | {b.get('trades')} trades | WR {b.get('win_rate',0):.1f}% | avg ${b.get('avg_pnl',0):.2f}"
+                break
+        return {
+            "outcomes": len(outcomes),
+            "similarity": sim,
+            "decision_cluster": decision_cluster,
+            "blacklisted": blacklisted[:8],
+            "best": best[:8],
+            "blocked": blocked,
+            "block_reason": block_reason,
+        }
+
+    def should_block_decision(self, decision: Any | None) -> tuple[bool, str]:
+        p = self.edge_profile(decision)
+        if p.get("blocked"):
+            return True, str(p.get("block_reason", "Underperforming learned cluster"))
+        # Similar setups with a real sample can also block Recommend/Paper auto entries.
+        sim = p.get("similarity", {}) or {}
+        if int(sim.get("matches", 0) or 0) >= 25 and float(sim.get("win_rate", 0.0) or 0.0) < 40 and float(sim.get("avg_pnl", 0.0) or 0.0) < 0:
+            return True, f"Similar memory is weak: {sim.get('matches')} matches | WR {float(sim.get('win_rate',0)):.1f}% | avg ${float(sim.get('avg_pnl',0)):.2f}"
+        return False, ""
+
+    def daily_report(self) -> str:
+        outcomes = self._read_jsonl(self.outcomes_path)
+        if not outcomes:
+            return "No paper outcomes yet. Let Paper Training run first."
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        todays = [x for x in outcomes if time.strftime("%Y-%m-%d", time.gmtime(float(x.get("ts") or 0))) == today]
+        sample = todays or outcomes[-100:]
+        wins = [x for x in sample if float(x.get("pnl") or 0) > 0]
+        total = sum(float(x.get("pnl") or 0) for x in sample)
+        by_side: dict[str, list[dict[str, Any]]] = {}
+        by_trigger: dict[str, list[dict[str, Any]]] = {}
+        for row in sample:
+            by_side.setdefault(str(row.get("side") or "?"), []).append(row)
+            by_trigger.setdefault(str(row.get("trigger_quality") or row.get("confirmation") or "Unknown"), []).append(row)
+        def line_for(name, rows):
+            w = [x for x in rows if float(x.get("pnl") or 0) > 0]
+            avg = sum(float(x.get("pnl") or 0) for x in rows) / len(rows)
+            return f"• {name}: {len(rows)} trades | WR {len(w)/len(rows)*100:.1f}% | avg ${avg:.2f}"
+        lines = [
+            "Daily / Session Report",
+            f"Sample: {len(sample)} trades ({'today' if todays else 'last 100'})",
+            f"Win rate: {len(wins)/len(sample)*100:.1f}%",
+            f"Total P/L: ${total:.2f}",
+            f"Best trade: ${max(float(x.get('pnl') or 0) for x in sample):.2f}",
+            f"Worst trade: ${min(float(x.get('pnl') or 0) for x in sample):.2f}",
+            "",
+            "By direction",
+        ]
+        lines.extend(line_for(k, v) for k, v in sorted(by_side.items()))
+        lines.append("")
+        lines.append("By trigger quality")
+        trig_rows = sorted(by_trigger.items(), key=lambda kv: len(kv[1]), reverse=True)[:8]
+        lines.extend(line_for(k, v) for k, v in trig_rows)
+        return "\n".join(lines)
+
+    def _cluster_from_decision(self, decision: Any | None) -> str:
+        if decision is None:
+            return ""
+        return f"{getattr(decision,'side','?')} | {getattr(decision,'trend_15m','?')}/{getattr(decision,'trend_5m','?')} | {getattr(decision,'confirmation','') or getattr(decision,'trigger_quality','confirm?')} | {getattr(decision,'session_label','session?')}"
+
     def summary_text(self, decision: Any | None = None) -> str:
         s = self.stats()
         sim = self.similarity(decision) if decision is not None else {"matches":0,"win_rate":0,"avg_pnl":0,"score":0,"label":"No active setup"}
         state = "ON" if s["enabled"] else "OFF"
         clusters = self.clusters(limit=5)
+        edge = self.edge_profile(decision) if decision is not None else self.edge_profile(None)
+        blacklist_text = "\n".join(
+            f"• {c['cluster']} | {c['trades']} trades | WR {c['win_rate']:.1f}% | avg ${c['avg_pnl']:.2f}"
+            for c in edge.get("blacklisted", [])[:5]
+        ) or "No blacklisted setup families yet."
+        best_text = "\n".join(
+            f"• {c['cluster']} | {c['trades']} trades | WR {c['win_rate']:.1f}% | avg ${c['avg_pnl']:.2f}"
+            for c in edge.get("best", [])[:5]
+        ) or "No proven best setup families yet."
         cluster_text = "\n".join(
             f"• {c['cluster']} | {c['trades']} trades | WR {c['win_rate']:.1f}% | avg ${c['avg_pnl']:.2f}"
             for c in clusters
@@ -272,7 +375,10 @@ class LearningMemory:
             f"Similar avg P/L: ${sim['avg_pnl']:.2f}\n"
             f"Memory score: {sim['score']}/100\n"
             f"Label: {sim['label']}\n\n"
-            "Setup Clusters\n" + cluster_text + "\n\n" + self.session_summary()
+            "Setup Clusters\n" + cluster_text + "\n\n"
+            "Best Learned Families\n" + best_text + "\n\n"
+            "Blacklisted / Avoid Families\n" + blacklist_text + "\n\n"
+            + self.daily_report() + "\n\n" + self.session_summary()
         )
 
     def _cluster_from_trade(self, trade: Any) -> str:

@@ -21,6 +21,9 @@ class PaperTrade:
     expires_at: Optional[float] = None
     trade_id: int = 0
     setup_meta: dict = field(default_factory=dict)
+    mfe: float = 0.0  # max favorable excursion in paper USD
+    mae: float = 0.0  # max adverse excursion in paper USD
+    manager_notes: list[str] = field(default_factory=list)
 
     @property
     def risk_per_unit(self) -> float:
@@ -41,7 +44,8 @@ class PaperTrade:
         return (
             f"#{self.trade_id:04d} {status} {self.side} | entry {self.entry:,.2f} | "
             f"stop {self.stop:,.2f} | target {self.target:,.2f} | RR {self.rr:.2f}:1 | "
-            f"exit {exit_price:,.2f} via {outcome} | P/L ${self.pnl:,.2f}"
+            f"exit {exit_price:,.2f} via {outcome} | P/L ${self.pnl:,.2f} | "
+            f"MFE ${self.mfe:,.2f} / MAE ${self.mae:,.2f}"
         )
 
     def direction_label(self) -> str:
@@ -125,6 +129,8 @@ class PaperAccount:
             hit_target = price <= trade.target
         time_expired = bool(trade.expires_at and time.time() >= float(trade.expires_at))
         trade.pnl = unrealized
+        trade.mfe = max(float(getattr(trade, "mfe", 0.0)), float(unrealized))
+        trade.mae = min(float(getattr(trade, "mae", 0.0)), float(unrealized))
         if force_close or time_expired or hit_stop or hit_target:
             trade.status = "CLOSED"
             trade.exit_price = price
@@ -140,6 +146,8 @@ class PaperAccount:
                 trade.pnl = (price - trade.entry) / trade.entry * trade.size_usd
             else:
                 trade.pnl = (trade.entry - price) / trade.entry * trade.size_usd
+            trade.mfe = max(float(getattr(trade, "mfe", 0.0)), float(trade.pnl))
+            trade.mae = min(float(getattr(trade, "mae", 0.0)), float(trade.pnl))
             self.closed_pnl += trade.pnl
             self.reserved = max(0.0, self.reserved - trade.size_usd)
             self.balance += trade.size_usd + trade.pnl

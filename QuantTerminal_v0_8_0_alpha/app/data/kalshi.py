@@ -33,6 +33,40 @@ class KalshiMarketClock:
     updated_at: float = 0.0
     candidate_count: int = 0
     server_offset_seconds: float = 0.0
+    yes_bid: int | None = None
+    yes_ask: int | None = None
+    no_bid: int | None = None
+    no_ask: int | None = None
+    last_price: int | None = None
+    volume: int | None = None
+    liquidity: int | None = None
+
+    def price_line(self) -> str:
+        def fmt(v):
+            return "--" if v is None else f"{int(v)}¢"
+        spread = self.spread_cents()
+        spread_txt = "--" if spread is None else f"{spread}¢"
+        return (
+            f"YES {fmt(self.yes_bid)}/{fmt(self.yes_ask)} | "
+            f"NO {fmt(self.no_bid)}/{fmt(self.no_ask)} | "
+            f"last {fmt(self.last_price)} | spread {spread_txt}"
+        )
+
+    def spread_cents(self) -> int | None:
+        spreads = []
+        if self.yes_bid is not None and self.yes_ask is not None:
+            spreads.append(max(0, int(self.yes_ask) - int(self.yes_bid)))
+        if self.no_bid is not None and self.no_ask is not None:
+            spreads.append(max(0, int(self.no_ask) - int(self.no_bid)))
+        return min(spreads) if spreads else None
+
+    def side_entry_cents(self, side: str) -> int | None:
+        side = str(side).upper()
+        if side == "LONG":
+            return self.yes_ask if self.yes_ask is not None else self.last_price
+        if side == "SHORT":
+            return self.no_ask if self.no_ask is not None else (100 - self.last_price if self.last_price is not None else None)
+        return None
 
     def now_utc(self) -> datetime:
         return datetime.fromtimestamp(time.time() + float(self.server_offset_seconds or 0.0), tz=timezone.utc)
@@ -71,6 +105,13 @@ class KalshiBTC15Timer:
                 updated_at=self.clock.updated_at,
                 candidate_count=self.clock.candidate_count,
                 server_offset_seconds=self.clock.server_offset_seconds,
+                yes_bid=self.clock.yes_bid,
+                yes_ask=self.clock.yes_ask,
+                no_bid=self.clock.no_bid,
+                no_ask=self.clock.no_ask,
+                last_price=self.clock.last_price,
+                volume=self.clock.volume,
+                liquidity=self.clock.liquidity,
             )
 
     def refresh_async(self) -> None:
@@ -155,6 +196,13 @@ class KalshiBTC15Timer:
             updated_at=time.time(),
             candidate_count=int(market.get("_candidate_count", 0) or len(self._last_candidates)),
             server_offset_seconds=server_offset,
+            yes_bid=self._int_or_none(market.get("yes_bid")),
+            yes_ask=self._int_or_none(market.get("yes_ask")),
+            no_bid=self._int_or_none(market.get("no_bid")),
+            no_ask=self._int_or_none(market.get("no_ask")),
+            last_price=self._int_or_none(market.get("last_price")),
+            volume=self._int_or_none(market.get("volume")),
+            liquidity=self._int_or_none(market.get("liquidity")),
         ))
 
     def _set_error(self, message: str) -> None:
@@ -220,6 +268,14 @@ class KalshiBTC15Timer:
         except Exception:
             pass
         return None
+
+    def _int_or_none(self, value) -> int | None:
+        try:
+            if value is None or value == "":
+                return None
+            return int(round(float(value)))
+        except Exception:
+            return None
 
     def _parse_time(self, value: str | None) -> Optional[datetime]:
         if not value:
