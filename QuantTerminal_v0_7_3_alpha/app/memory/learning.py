@@ -109,6 +109,10 @@ class LearningMemory:
             "entry_model": meta.get("entry_model", ""),
             "higher_tf_bias": meta.get("higher_tf_bias", ""),
             "trigger_quality": meta.get("trigger_quality", ""),
+            "trigger_sequence": meta.get("trigger_sequence", ""),
+            "sweep_detected": meta.get("sweep_detected", False),
+            "choch_detected": meta.get("choch_detected", False),
+            "displacement_detected": meta.get("displacement_detected", False),
             "training_probe": meta.get("training_probe", False),
         }
         with self.outcomes_path.open("a", encoding="utf-8") as f:
@@ -160,6 +164,12 @@ class LearningMemory:
             if str(getattr(decision, "entry_model", "")) and str(getattr(decision, "entry_model", "")) == str(row.get("entry_model", "")):
                 score += 1
             if str(getattr(decision, "higher_tf_bias", "")) and str(getattr(decision, "higher_tf_bias", "")) == str(row.get("higher_tf_bias", "")):
+                score += 1
+            if bool(getattr(decision, "choch_detected", False)) == bool(row.get("choch_detected", False)):
+                score += 1
+            if bool(getattr(decision, "sweep_detected", False)) == bool(row.get("sweep_detected", False)):
+                score += 1
+            if str(getattr(decision, "trigger_sequence", "")) and str(getattr(decision, "trigger_sequence", "")) == str(row.get("trigger_sequence", "")):
                 score += 1
             if "FVG" in reason or "FVG" in latest:
                 score += 1

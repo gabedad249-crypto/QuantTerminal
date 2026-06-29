@@ -48,12 +48,16 @@ class SetupDecision:
     higher_tf_bias: str = "WAIT"
     trigger_quality: str = "Waiting"
     training_probe: bool = False
+    sweep_detected: bool = False
+    choch_detected: bool = False
+    displacement_detected: bool = False
+    trigger_sequence: str = "Waiting"
 
 
 class FVGSetupEngine:
     """Disciplined FVG confirmation engine.
 
-    v0.7.2 adds a TradersNotes-style 5m bias -> 1m execution model plus a training-probe mode so it actually produces paper trades:
+    v0.7.3 adds the proper Sweep -> CHoCH -> Displacement -> 1m FVG entry model plus a training-probe mode so it actually produces paper trades:
     SCANNING -> FOUND_GAP -> WAIT_PULLBACK -> WAIT_CONFIRMATION -> READY_CHECK -> READY -> IN_TRADE -> LEARNING.
 
     It still uses exactly one core strategy:
@@ -113,7 +117,7 @@ class FVGSetupEngine:
         if trend_side not in ("LONG", "SHORT"):
             trend_side = self._micro_momentum_side(candles_1m)
         trend_ok = trend_side in ("LONG", "SHORT")
-        d.entry_model = "5m bias -> 1m FVG execution"
+        d.entry_model = "5m bias -> Sweep/CHoCH -> 1m FVG execution"
         d.checklist.append(("✅" if trend_ok else "❌") + f" Bias: 15m {d.trend_15m}, 5m {d.trend_5m}, 5m GAP bias {htf_side}")
         if trend_ok:
             d.side = trend_side
@@ -171,10 +175,15 @@ class FVGSetupEngine:
             impulse_score = self._impulse_score(candles_1m, fvg_index, avg_body)
             fvg_quality = self._fvg_quality_score(fvg, current.close, avg_body, age)
             retrace_ok = self._price_inside_fvg(current.close, fvg, avg_body)
+            sweep = self._liquidity_sweep(candles_1m, side)
+            choch = self._choch(candles_1m, side)
+            displacement = self._displacement(candles_1m, side, avg_body)
             confirmation = self._confirmation(candles_1m, side)
+            if not confirmation and sweep and choch and displacement:
+                confirmation = ("Bullish" if side == "LONG" else "Bearish") + " Sweep → CHoCH → Displacement"
             if not confirmation:
                 confirmation = self._soft_confirmation(candles_1m, side, fvg, avg_body)
-            candidates.append((fvg, side, impulse_score, fvg_quality, retrace_ok, confirmation, fvg_index, age))
+            candidates.append((fvg, side, impulse_score, fvg_quality, retrace_ok, confirmation, fvg_index, age, sweep, choch, displacement))
 
         if not candidates:
             d.state = "SCANNING" if not self.focus_gap_key else "FOUND_GAP"
@@ -204,7 +213,7 @@ class FVGSetupEngine:
             self.focus_gap_key = ""
             self.focus_side = ""
             return d
-        fvg, side, impulse_score, fvg_quality, retrace_ok, confirmation, fvg_index, age = selected
+        fvg, side, impulse_score, fvg_quality, retrace_ok, confirmation, fvg_index, age, sweep, choch, displacement = selected
         self.focus_gap_key = self._fvg_key(fvg)
         self.focus_side = side
         impulse_ok = impulse_score >= 5
@@ -212,6 +221,10 @@ class FVGSetupEngine:
         d.impulse_score = impulse_score
         d.fvg_quality_score = fvg_quality
         d.confirmation = confirmation or ""
+        d.sweep_detected = bool(sweep)
+        d.choch_detected = bool(choch)
+        d.displacement_detected = bool(displacement)
+        d.trigger_sequence = self._trigger_sequence(side, sweep, choch, displacement, confirmation)
         d.active_fvg_key = self._fvg_key(fvg)
         d.focused_gap = d.active_fvg_key
         d.active_fvg_direction = fvg.direction
@@ -222,8 +235,11 @@ class FVGSetupEngine:
         d.checklist.append("✅ FVG: aligned " + fvg.direction)
         d.checklist.append(("✅" if impulse_ok else "❌") + f" Impulse: score {impulse_score}/20")
         d.checklist.append(("✅" if fvg_quality >= 4 else "❌") + f" GAP quality: score {fvg_quality}/20")
-        d.checklist.append(("✅" if retrace_ok else "❌") + " Retrace: price returned into the GAP")
-        d.checklist.append(("✅" if confirmation else "❌") + f" Confirmation: {confirmation or 'waiting for engulfing/rejection candle'}")
+        d.checklist.append(("✅" if retrace_ok else "❌") + " Retrace: price returned into/near the GAP")
+        d.checklist.append(("✅" if sweep else "❌") + " Sweep: price took nearby liquidity")
+        d.checklist.append(("✅" if choch else "❌") + " CHoCH: market structure shifted back with bias")
+        d.checklist.append(("✅" if displacement else "❌") + " Displacement: strong candle away from sweep")
+        d.checklist.append(("✅" if confirmation else "❌") + f" Trigger: {confirmation or 'waiting for Sweep → CHoCH / displacement'}")
         d.safety_checks.append("✅ One-GAP lifecycle: one active plan per GAP")
         d.safety_checks.append(f"✅ GAP age: {age} bars old" if age <= self.max_fvg_age_bars else f"❌ GAP too old: {age} bars")
 
@@ -246,13 +262,19 @@ class FVGSetupEngine:
             d.reasons.append("Price has not pulled back into the GAP yet")
             d.confidence_breakdown.append("+0 Waiting for pullback")
 
+        if sweep:
+            d.confidence_breakdown.append("+8 Liquidity sweep")
+        if choch:
+            d.confidence_breakdown.append("+12 CHoCH structure shift")
+        if displacement:
+            d.confidence_breakdown.append("+8 Displacement candle")
         if confirmation:
-            d.trigger_quality = "Strong" if "Engulfing" in confirmation or "Rejection" in confirmation else "Good"
-            d.confidence_breakdown.append("+18 " + confirmation)
+            d.trigger_quality = "A-grade Sweep→CHoCH" if (sweep and choch and displacement) else ("Strong" if "Engulfing" in confirmation or "Rejection" in confirmation else "Good")
+            d.confidence_breakdown.append("+14 " + confirmation)
         else:
             if retrace_ok:
                 d.state = "WAIT_CONFIRMATION"
-            d.reasons.append("Waiting for engulfing/rejection confirmation")
+            d.reasons.append("Waiting for Sweep → CHoCH → displacement/FVG confirmation")
             d.confidence_breakdown.append("+0 Confirmation not printed")
 
         time_ok = self.seconds_left is None or self.seconds_left >= self.min_seconds_left
@@ -264,7 +286,8 @@ class FVGSetupEngine:
         # B-grade paper probes when the 5m/1m direction is aligned and price retests
         # the GAP. Those probes are labeled for memory instead of pretending they are A+ setups.
         trend_gate = trend_ok or d.trend_15m in ("Building", "Sideways") or d.trend_5m in ("Bullish", "Bearish")
-        strong_setup = bool(trend_gate and impulse_ok and retrace_ok and confirmation and fvg_quality >= 4 and time_ok)
+        choch_model_ok = bool(sweep and choch and displacement)
+        strong_setup = bool(trend_gate and impulse_ok and retrace_ok and confirmation and choch_model_ok and fvg_quality >= 4 and time_ok)
         probe_setup = bool(
             self.training_probe_enabled
             and trend_gate
@@ -272,7 +295,7 @@ class FVGSetupEngine:
             and retrace_ok
             and impulse_score >= 4
             and fvg_quality >= 3
-            and (confirmation or self._directional_close(candles_1m, side))
+            and (confirmation or choch_model_ok or self._directional_close(candles_1m, side))
         )
         if probe_setup and not strong_setup:
             d.training_probe = True
@@ -287,8 +310,8 @@ class FVGSetupEngine:
                 d.state = "SCANNING"
             elif not retrace_ok:
                 d.state = "WAIT_PULLBACK"
-            elif not (confirmation or self._directional_close(candles_1m, side)):
-                d.state = "WAIT_CONFIRMATION"
+            elif not (confirmation or choch_model_ok or self._directional_close(candles_1m, side)):
+                d.state = "WAIT_CHOCH"
             else:
                 d.state = "FOUND_GAP"
             d.confidence = min(85, self._score_from_breakdown(d.confidence_breakdown))
@@ -325,7 +348,7 @@ class FVGSetupEngine:
         d.confidence = min(96, self._score_from_breakdown(d.confidence_breakdown))
         d.grade = self._grade(d.confidence)
         d.ready = d.confidence >= self.min_confidence_to_trade
-        d.plan = TradePlan(side, entry, stop, target, rr, f"{d.entry_model}: {confirmation or d.trigger_quality or 'Training Probe'}")
+        d.plan = TradePlan(side, entry, stop, target, rr, f"{d.entry_model}: {d.trigger_sequence}")
         if d.ready:
             d.reasons.append("VALID FVG CONFIRMATION SETUP" if not d.training_probe else "VALID PAPER TRAINING PROBE")
             d.safety_checks.append("✅ Safety: valid setup, no trade active, RR passed")
@@ -368,6 +391,66 @@ class FVGSetupEngine:
             return cur.close > cur.open and cur.close > prev.close
         return cur.close < cur.open and cur.close < prev.close
 
+    def _swing_levels(self, candles: list[Candle], lookback: int = 10) -> tuple[float, float]:
+        sample = candles[-lookback-1:-1] if len(candles) > lookback else candles[:-1]
+        if not sample:
+            c = candles[-1]
+            return c.high, c.low
+        return max(c.high for c in sample), min(c.low for c in sample)
+
+    def _liquidity_sweep(self, candles: list[Candle], side: str) -> bool:
+        """Sweep means price took a nearby high/low first; it is NOT CHoCH by itself."""
+        if len(candles) < 8:
+            return False
+        cur = candles[-1]
+        prev_high, prev_low = self._swing_levels(candles, lookback=8)
+        body_hi = max(cur.open, cur.close)
+        body_lo = min(cur.open, cur.close)
+        rng = max(cur.high - cur.low, 0.0001)
+        if side == "LONG":
+            # swept below a recent low and rejected back upward
+            return cur.low < prev_low and cur.close > body_lo + rng * 0.45
+        # swept above a recent high and rejected back downward
+        return cur.high > prev_high and cur.close < body_hi - rng * 0.45
+
+    def _choch(self, candles: list[Candle], side: str) -> bool:
+        """CHoCH = Change of Character: break back through recent micro structure in the trade direction."""
+        if len(candles) < 10:
+            return False
+        cur = candles[-1]
+        # Use bars before the current trigger candle so the current close can break structure.
+        structure = candles[-9:-1]
+        if side == "LONG":
+            recent_lower_high = max(c.high for c in structure[-5:])
+            return cur.close > recent_lower_high
+        recent_higher_low = min(c.low for c in structure[-5:])
+        return cur.close < recent_higher_low
+
+    def _displacement(self, candles: list[Candle], side: str, avg_body: float) -> bool:
+        if len(candles) < 2:
+            return False
+        cur = candles[-1]
+        body = abs(cur.close - cur.open)
+        rng = max(cur.high - cur.low, 0.0001)
+        strong_body = body >= max(avg_body * 0.75, rng * 0.42)
+        if side == "LONG":
+            return strong_body and cur.close > cur.open and cur.close >= cur.low + rng * 0.62
+        return strong_body and cur.close < cur.open and cur.close <= cur.low + rng * 0.38
+
+    def _trigger_sequence(self, side: str, sweep: bool, choch: bool, displacement: bool, confirmation: str | None) -> str:
+        parts = []
+        if sweep:
+            parts.append("Sweep")
+        if choch:
+            parts.append("CHoCH")
+        if displacement:
+            parts.append("Displacement")
+        if confirmation:
+            parts.append(confirmation)
+        if not parts:
+            return "Waiting for Sweep → CHoCH"
+        return " → ".join(parts)
+
     def _setup_signature(self, d: SetupDecision, fvg: FVG, side: str, confirmation: str | None) -> str:
         return "|".join([
             side,
@@ -376,6 +459,7 @@ class FVGSetupEngine:
             fvg.direction,
             fvg.status,
             confirmation or "NO_CONFIRM",
+            getattr(d, "trigger_sequence", "NO_SEQUENCE"),
             d.session_label,
         ])
 

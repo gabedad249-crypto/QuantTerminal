@@ -203,7 +203,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.7.2: 5m bias → 1m execution • paper probes • trade diagnostics"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.7.3: 5m bias → 1m execution • paper probes • trade diagnostics"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -486,7 +486,7 @@ class MainWindow(QMainWindow):
             recommend_line = f"\nRecommend Only: alert this setup, do not auto-paper. Suggested cash plan = {configured_cash_line}."
 
         ai_text = (
-            f"FVG Logic Engine v0.7.2\n\n"
+            f"FVG Logic Engine v0.7.3\n\n"
             f"State\n{getattr(d, 'state', 'UNKNOWN')}\n\n"
             f"Decision\n{('READY ' + d.side) if d.ready else 'WAIT'}\n\n"
             f"Grade / Confidence\n{d.grade} / {d.confidence}%\n\n"
@@ -542,13 +542,15 @@ class MainWindow(QMainWindow):
             f"Current State: {getattr(d, 'state', 'UNKNOWN')}\n"
             f"Entry Model: {getattr(d, 'entry_model', 'FVG')}\n"
             f"5m Bias: {getattr(d, 'higher_tf_bias', 'WAIT')} | Trigger: {getattr(d, 'trigger_quality', 'Waiting')}\n"
+            f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
+            f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
             f"Setup Signature: {getattr(d, 'setup_signature', '') or 'None yet'}\n\n"
             "Question Process\n"
             "1. Do we have enough 1m candles?\n"
             "2. What is the 5m bias / 15m context?\n"
             "3. Did 1m print an execution FVG/GAP?\n"
             "4. Did price pull back into or near the GAP?\n"
-            "5. Did a 1m displacement/engulfing/rejection trigger?\n"
+            "5. Did Sweep → CHoCH → displacement print?\n"
             "6. Does cash RR pass your filter?\n"
             "7. Do safety rules allow a paper trade?\n\n"
             "Live Checklist\n" + "\n".join(checklist[-12:]) + "\n\n"
@@ -581,6 +583,8 @@ class MainWindow(QMainWindow):
             f"Session: {getattr(d, 'session_label', 'Unknown')}\n"
             f"Entry Model: {getattr(d, 'entry_model', 'FVG')}\n"
             f"5m Bias: {getattr(d, 'higher_tf_bias', 'WAIT')} | Trigger: {getattr(d, 'trigger_quality', 'Waiting')}\n"
+            f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
+            f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
             f"Focused GAP: {getattr(d, 'latest_fvg', 'None')}\n\n"
             "What must happen next\n"
         )
@@ -1080,6 +1084,10 @@ class MainWindow(QMainWindow):
             "entry_model": str(getattr(d, "entry_model", "")),
             "higher_tf_bias": str(getattr(d, "higher_tf_bias", "")),
             "trigger_quality": str(getattr(d, "trigger_quality", "")),
+            "trigger_sequence": str(getattr(d, "trigger_sequence", "")),
+            "sweep_detected": bool(getattr(d, "sweep_detected", False)),
+            "choch_detected": bool(getattr(d, "choch_detected", False)),
+            "displacement_detected": bool(getattr(d, "displacement_detected", False)),
             "training_probe": bool(getattr(d, "training_probe", False)),
         }
 
@@ -1293,7 +1301,7 @@ class MainWindow(QMainWindow):
             f"Session P/L: ${total_pnl:,.2f}\n"
             f"Best trade: ${best:,.2f}\n"
             f"Worst trade: ${worst:,.2f}\n\n"
-            "v0.7.2: 5m bias -> 1m execution, paper-training probes, one-GAP lifecycle, and guardrailed auto-tune are active."
+            "v0.7.3: 5m bias -> 1m execution, paper-training probes, one-GAP lifecycle, and guardrailed auto-tune are active."
         )
         self._set_text_stable(self.memory_stats_box, text, "_last_memory_stats_text")
 
