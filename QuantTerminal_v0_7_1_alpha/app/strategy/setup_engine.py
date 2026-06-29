@@ -49,7 +49,7 @@ class SetupDecision:
 class FVGSetupEngine:
     """Disciplined FVG confirmation engine.
 
-    v0.7.0 tightens the logic into a real state machine:
+    v0.7.1 keeps the clean state machine but adds warmup/probe rules so it actually takes valid paper trades:
     SCANNING -> FOUND_GAP -> WAIT_PULLBACK -> WAIT_CONFIRMATION -> READY_CHECK -> READY -> IN_TRADE -> LEARNING.
 
     It still uses exactly one core strategy:
@@ -59,14 +59,16 @@ class FVGSetupEngine:
     def __init__(self, min_rr: float = 2.0) -> None:
         self.fvg_engine = FVGEngine()
         self.min_rr = float(min_rr)
-        self.min_candles = 90
-        self.max_fvg_age_bars = 55
-        self.min_confidence_to_trade = 72
+        # v0.7.0 was too strict and could sit all day without training data.
+        # These are still guarded, but loose enough to let the paper bot learn.
+        self.min_candles = 45
+        self.max_fvg_age_bars = 90
+        self.min_confidence_to_trade = 62
         self.focus_gap_key: str = ""
         self.focus_side: str = ""
         self.used_gap_keys: set[str] = set()
         self.seconds_left: int | None = None
-        self.min_seconds_left = 90
+        self.min_seconds_left = 45
 
     def configure_context(self, used_gap_keys: set[str] | None = None, seconds_left: int | None = None) -> None:
         """UI/runtime context for safety rules.
@@ -135,6 +137,8 @@ class FVGSetupEngine:
                 continue
             if key in self.used_gap_keys:
                 continue
+            # Direction preference: aligned trend is best, but when 15m is still building/sideways,
+            # let a clean 1m/5m GAP train in paper mode instead of freezing forever.
             if trend_ok and side != trend_side:
                 if key == self.focus_gap_key:
                     invalidated_focus = "trend flipped against focused GAP"
@@ -150,8 +154,10 @@ class FVGSetupEngine:
                 continue
             impulse_score = self._impulse_score(candles_1m, fvg_index, avg_body)
             fvg_quality = self._fvg_quality_score(fvg, current.close, avg_body, age)
-            retrace_ok = self._price_inside_fvg(current.close, fvg)
+            retrace_ok = self._price_inside_fvg(current.close, fvg, avg_body)
             confirmation = self._confirmation(candles_1m, side)
+            if not confirmation:
+                confirmation = self._soft_confirmation(candles_1m, side, fvg, avg_body)
             candidates.append((fvg, side, impulse_score, fvg_quality, retrace_ok, confirmation, fvg_index, age))
 
         if not candidates:
@@ -185,7 +191,7 @@ class FVGSetupEngine:
         fvg, side, impulse_score, fvg_quality, retrace_ok, confirmation, fvg_index, age = selected
         self.focus_gap_key = self._fvg_key(fvg)
         self.focus_side = side
-        impulse_ok = impulse_score >= 12
+        impulse_ok = impulse_score >= 8
         d.side = side
         d.impulse_score = impulse_score
         d.fvg_quality_score = fvg_quality
@@ -199,7 +205,7 @@ class FVGSetupEngine:
 
         d.checklist.append("✅ FVG: aligned " + fvg.direction)
         d.checklist.append(("✅" if impulse_ok else "❌") + f" Impulse: score {impulse_score}/20")
-        d.checklist.append(("✅" if fvg_quality >= 10 else "❌") + f" GAP quality: score {fvg_quality}/20")
+        d.checklist.append(("✅" if fvg_quality >= 6 else "❌") + f" GAP quality: score {fvg_quality}/20")
         d.checklist.append(("✅" if retrace_ok else "❌") + " Retrace: price returned into the GAP")
         d.checklist.append(("✅" if confirmation else "❌") + f" Confirmation: {confirmation or 'waiting for engulfing/rejection candle'}")
         d.safety_checks.append("✅ One-GAP lifecycle: one active plan per GAP")
@@ -211,7 +217,7 @@ class FVGSetupEngine:
             d.reasons.append("FVG impulse is weak")
             d.confidence_breakdown.append(f"+{impulse_score} Weak impulse")
 
-        if fvg_quality >= 10:
+        if fvg_quality >= 6:
             d.confidence_breakdown.append(f"+{fvg_quality} GAP quality")
         else:
             d.reasons.append("GAP quality is weak or already messy")
@@ -236,10 +242,12 @@ class FVGSetupEngine:
         if not time_ok:
             d.reasons.append("BTC15 is too close to expiry for a new setup")
             d.confidence_breakdown.append("+0 BTC15 time safety failed")
-        if not (trend_ok and impulse_ok and retrace_ok and confirmation and fvg_quality >= 10 and time_ok):
+        # Warmup/probe logic: aligned trend is preferred, but not required when higher TF is building.
+        trend_gate = trend_ok or d.trend_15m in ("Building", "Sideways") or d.trend_5m in ("Bullish", "Bearish")
+        if not (trend_gate and impulse_ok and retrace_ok and confirmation and fvg_quality >= 6 and time_ok):
             if not time_ok:
                 d.state = "SCANNING"
-            elif not trend_ok:
+            elif not trend_gate:
                 d.state = "SCANNING"
             elif not retrace_ok:
                 d.state = "WAIT_PULLBACK"
@@ -371,8 +379,13 @@ class FVGSetupEngine:
             return "price moved too far away from focused GAP"
         return ""
 
-    def _price_inside_fvg(self, price: float, fvg: FVG) -> bool:
-        return min(fvg.bottom, fvg.top) <= price <= max(fvg.bottom, fvg.top)
+    def _price_inside_fvg(self, price: float, fvg: FVG, avg_body: float = 1.0) -> bool:
+        # Accept a near retest too. Exact-in-gap only was too strict for fast BTC candles.
+        lo = min(fvg.bottom, fvg.top)
+        hi = max(fvg.bottom, fvg.top)
+        gap_height = max(hi - lo, 0.01)
+        tolerance = max(avg_body * 0.8, gap_height * 0.35, price * 0.00008)
+        return (lo - tolerance) <= price <= (hi + tolerance)
 
     def _confirmation(self, candles: list[Candle], side: str) -> str | None:
         if len(candles) < 3:
@@ -402,6 +415,27 @@ class FVGSetupEngine:
                 return "Bearish Engulfing"
             if reject:
                 return "Bearish Rejection"
+        return None
+
+    def _soft_confirmation(self, candles: list[Candle], side: str, fvg: FVG, avg_body: float) -> str | None:
+        """Less perfect but useful confirmation for paper training.
+
+        The bot still needs pullback + direction candle, but it no longer waits only
+        for textbook engulfing. This creates training trades so memory can improve.
+        """
+        if len(candles) < 2:
+            return None
+        cur = candles[-1]
+        body = abs(cur.close - cur.open)
+        rng = max(cur.high - cur.low, 0.0001)
+        body_ok = body >= max(avg_body * 0.55, rng * 0.35)
+        mid = (min(fvg.bottom, fvg.top) + max(fvg.bottom, fvg.top)) / 2.0
+        if side == "LONG":
+            if cur.close > cur.open and body_ok and cur.close >= mid:
+                return "Bullish Momentum Confirm"
+        else:
+            if cur.close < cur.open and body_ok and cur.close <= mid:
+                return "Bearish Momentum Confirm"
         return None
 
     def _score_from_breakdown(self, rows: list[str]) -> int:

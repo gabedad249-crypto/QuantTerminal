@@ -1,8 +1,8 @@
-# Quant Terminal v0.7.0 Alpha
+# Quant Terminal v0.7.1 Alpha
 
 FVG-focused paper-training and recommendation terminal.
 
-## What changed in v0.7.0
+## What changed in v0.7.1
 
 This release tightens the core logic instead of adding clutter.
 
@@ -44,5 +44,22 @@ run_quant_terminal.bat
 ```bat
 git add .
 git commit -m "Add clean state machine gap lifecycle and richer training labels"
+git push
+```
+
+
+## v0.7.1 Hotfix - Training Mode Actually Takes Plays
+
+- Loosened the state machine so it can collect paper-training data.
+- Reduced warmup from 90 candles to 45 candles.
+- BTC15 minimum time left reduced from 90s to 45s.
+- Pullback can now be near the GAP, not only perfectly inside it.
+- Added soft momentum confirmation so it does not wait forever for perfect engulfing candles.
+- Still keeps safety rules: one active trade, one focused GAP, no repeated same-GAP spam, RR filter, and active-trade pause.
+
+Commit:
+```
+git add .
+git commit -m "Loosen state machine for paper training entries"
 git push
 ```
