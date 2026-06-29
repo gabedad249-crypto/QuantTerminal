@@ -394,13 +394,22 @@ class ChartWidget(QGraphicsView):
         y_stop = max(self._plot.top() + 2, min(self._plot.bottom() - 2, y_stop_raw))
         y_target = max(self._plot.top() + 2, min(self._plot.bottom() - 2, y_target_raw))
 
-        # Transparent risk/reward zones meet at the buy-in line. Lines that are
-        # far off screen are pinned to the top/bottom edge so target/stop never
-        # crush the candles or disappear.
-        green = QColor("#22c55e"); green.setAlpha(34)
-        red = QColor("#ef4444"); red.setAlpha(34)
-        self.scene.addRect(QRectF(self._plot.left(), min(y_entry, y_target), self._plot.width(), max(2, abs(y_target - y_entry))), QPen(Qt.NoPen), QBrush(green))
-        self.scene.addRect(QRectF(self._plot.left(), min(y_entry, y_stop), self._plot.width(), max(2, abs(y_stop - y_entry))), QPen(Qt.NoPen), QBrush(red))
+        # Transparent risk/reward zones meet at the buy-in line, but are visually
+        # capped. A $20 paper buy-in with a $1 payout can translate to a huge BTC
+        # price distance; drawing that full distance makes the chart unreadable.
+        # The actual stop/target price lines still show the real pass/fail levels.
+        green = QColor("#22c55e"); green.setAlpha(22)
+        red = QColor("#ef4444"); red.setAlpha(22)
+
+        def capped_zone_y(raw_y: float, entry_y: float) -> float:
+            max_zone = max(24.0, self._plot.height() * 0.22)
+            delta = max(-max_zone, min(max_zone, raw_y - entry_y))
+            return max(self._plot.top() + 2, min(self._plot.bottom() - 2, entry_y + delta))
+
+        zy_target = capped_zone_y(y_target_raw, y_entry)
+        zy_stop = capped_zone_y(y_stop_raw, y_entry)
+        self.scene.addRect(QRectF(self._plot.left(), min(y_entry, zy_target), self._plot.width(), max(2, abs(zy_target - y_entry))), QPen(Qt.NoPen), QBrush(green))
+        self.scene.addRect(QRectF(self._plot.left(), min(y_entry, zy_stop), self._plot.width(), max(2, abs(zy_stop - y_entry))), QPen(Qt.NoPen), QBrush(red))
 
         def line(key: str, raw_y: float, y: float, price: float, color: str, label: str, cash: str = "") -> None:
             visible = self._plot.top() <= raw_y <= self._plot.bottom()
@@ -450,9 +459,27 @@ class ChartWidget(QGraphicsView):
         if not candles or not self._plot.contains(self.hover_scene.x(), self.hover_scene.y()):
             return None, -1
         step = self._plot.width() / max(1, len(candles))
-        idx = int((self.hover_scene.x() - self._plot.left()) / max(1, step))
+        body_w = max(3, min(14, step * 0.58))
+        mx = self.hover_scene.x()
+        my = self.hover_scene.y()
+        idx = int((mx - self._plot.left()) / max(1, step))
         idx = max(0, min(len(candles) - 1, idx))
-        return candles[idx], global_start + idx
+        c = candles[idx]
+        # Hover card only appears when the mouse is actually on the candle wick or
+        # body, not just anywhere inside that candle's time slot. This keeps the
+        # chart from popping a card while you are just moving around the panel.
+        x = self._x(idx, len(candles))
+        y_high = self._y(c.high)
+        y_low = self._y(c.low)
+        y_body_top = self._y(max(c.open, c.close))
+        y_body_bot = self._y(min(c.open, c.close))
+        on_body = (abs(mx - x) <= body_w / 2 + 2) and (y_body_top - 2 <= my <= y_body_bot + 2)
+        on_wick = (abs(mx - x) <= 4) and (min(y_high, y_low) - 2 <= my <= max(y_high, y_low) + 2)
+        if not (on_body or on_wick):
+            return None, -1
+        # Prefer finished candles. The last visible candle is usually the live
+        # forming candle; still allow it only when the mouse is exactly on it.
+        return c, global_start + idx
 
     def _draw_candle_hover_card(self, x: float, y: float) -> None:
         candle, global_idx = self._hover_candle_info()

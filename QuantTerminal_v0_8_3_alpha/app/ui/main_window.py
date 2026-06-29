@@ -1,5 +1,7 @@
 from PySide6.QtCore import QTimer, Signal, QObject, Qt
 import time
+import json
+from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
@@ -61,6 +63,9 @@ class MainWindow(QMainWindow):
         self._used_gap_keys: set[str] = set()
         self._last_15m_bucket = 0
         self._last_15m_open = None
+        self._ready_confirm_sig = ""
+        self._ready_confirm_candle_ts = 0
+        self._ready_confirm_count = 0
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
@@ -106,17 +111,18 @@ class MainWindow(QMainWindow):
         self.learning_toggle.setChecked(True)
         self.learning_toggle.stateChanged.connect(self.on_learning_toggle)
         self.auto_paper_toggle = QCheckBox("Auto-open paper when ready")
-        self.auto_paper_toggle.setChecked(True)
-        self.mode_box = QComboBox(); self.mode_box.addItems(["Paper Training (auto paper)", "Recommend Only (alerts)"])
-        self.training_speed_box = QComboBox(); self.training_speed_box.addItems(["More Trades", "Strict Quality", "Max Training Data"]); self.training_speed_box.setCurrentText("More Trades")
+        self.auto_paper_toggle.setChecked(bool(saved_ui.get("auto_paper", True)))
+        self.mode_box = QComboBox(); self.mode_box.addItems(["Paper Training (auto paper)", "Recommend Only (alerts)"]); self.mode_box.setCurrentText(str(saved_ui.get("mode", "Paper Training (auto paper)")))
+        self.training_speed_box = QComboBox(); self.training_speed_box.addItems(["More Trades", "Strict Quality", "Max Training Data"]); self.training_speed_box.setCurrentText(str(saved_ui.get("training_speed", "More Trades")))
         self.kalshi_url_box = QLineEdit(settings.get("kalshi_market_url", "https://kalshi.com/category/crypto/btc?frequency=fifteen_min"))
         self.kalshi_url_box.setPlaceholderText("Paste Kalshi BTC15 market URL")
+        saved_ui = self._load_trading_ui_settings()
 
         self.side_box = QComboBox(); self.side_box.addItems(["LONG", "SHORT"])
-        self.size_box = NoWheelDoubleSpinBox(); self.size_box.setRange(1, 100000); self.size_box.setDecimals(2); self.size_box.setSingleStep(1); self.size_box.setValue(20.00); self.size_box.setPrefix("$")
-        self.stop_box = NoWheelDoubleSpinBox(); self.stop_box.setRange(0.01, 100000); self.stop_box.setDecimals(2); self.stop_box.setSingleStep(0.10); self.stop_box.setValue(0.50); self.stop_box.setPrefix("$")
-        self.rr_box = NoWheelDoubleSpinBox(); self.rr_box.setRange(0.01, 100000); self.rr_box.setDecimals(2); self.rr_box.setSingleStep(0.10); self.rr_box.setValue(1.00); self.rr_box.setPrefix("$")
-        self.min_rr_box = NoWheelDoubleSpinBox(); self.min_rr_box.setRange(0.5, 10); self.min_rr_box.setDecimals(2); self.min_rr_box.setValue(float(self.setup_engine.min_rr))
+        self.size_box = NoWheelDoubleSpinBox(); self.size_box.setRange(1, 100000); self.size_box.setDecimals(2); self.size_box.setSingleStep(1); self.size_box.setValue(float(saved_ui.get("buy_in_usd", 20.00))); self.size_box.setPrefix("$")
+        self.stop_box = NoWheelDoubleSpinBox(); self.stop_box.setRange(0.01, 100000); self.stop_box.setDecimals(2); self.stop_box.setSingleStep(0.10); self.stop_box.setValue(float(saved_ui.get("stop_loss_usd", 0.50))); self.stop_box.setPrefix("$")
+        self.rr_box = NoWheelDoubleSpinBox(); self.rr_box.setRange(0.01, 100000); self.rr_box.setDecimals(2); self.rr_box.setSingleStep(0.10); self.rr_box.setValue(float(saved_ui.get("target_payout_usd", 1.00))); self.rr_box.setPrefix("$")
+        self.min_rr_box = NoWheelDoubleSpinBox(); self.min_rr_box.setRange(0.5, 10); self.min_rr_box.setDecimals(2); self.min_rr_box.setValue(float(saved_ui.get("min_setup_rr", self.setup_engine.min_rr)))
 
         self.entry_price_box = self._price_spin()
         self.stop_price_box = self._price_spin()
@@ -159,6 +165,34 @@ class MainWindow(QMainWindow):
         self.update_stats()
         self.feed.start()
         self.logger.info("Quant Terminal started")
+
+
+    def _trading_ui_settings_path(self) -> Path:
+        return Path("config") / "paper_trading_ui.json"
+
+    def _load_trading_ui_settings(self) -> dict:
+        path = self._trading_ui_settings_path()
+        try:
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def save_trading_ui_settings(self) -> None:
+        data = {
+            "buy_in_usd": self._cash_size(),
+            "stop_loss_usd": self._cash_stop_loss(),
+            "target_payout_usd": self._cash_payout(),
+            "min_setup_rr": float(self.min_rr_box.value()) if hasattr(self, "min_rr_box") else 2.0,
+            "mode": self.mode_box.currentText() if hasattr(self, "mode_box") else "Paper Training (auto paper)",
+            "training_speed": self.training_speed_box.currentText() if hasattr(self, "training_speed_box") else "More Trades",
+            "auto_paper": bool(self.auto_paper_toggle.isChecked()) if hasattr(self, "auto_paper_toggle") else True,
+        }
+        path = self._trading_ui_settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.log(f"Saved paper settings: buy-in ${data['buy_in_usd']:.2f}, stop ${data['stop_loss_usd']:.2f}, payout ${data['target_payout_usd']:.2f}, min RR {data['min_setup_rr']:.2f}")
 
     def _price_spin(self) -> QDoubleSpinBox:
         box = NoWheelDoubleSpinBox()
@@ -206,7 +240,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.2: data health • candle hover reads • live payout zones"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.3: live payout fix • exact candle hover • compact risk zones"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -235,6 +269,9 @@ class MainWindow(QMainWindow):
         fl.addRow("Min setup RR filter", self.min_rr_box)
         fl.addRow("Ratio", self.plan_rr_label)
         fl.addRow("Auto paper", self.auto_paper_toggle)
+        save_settings_btn = QPushButton("Save paper settings")
+        save_settings_btn.clicked.connect(self.save_trading_ui_settings)
+        fl.addRow(save_settings_btn)
         note = QLabel("Training mode auto-opens after READY. More Trades = balanced. Max Training Data adds labeled scout probes. Strict Quality waits for cleaner CHoCH/FVG.")
         note.setObjectName("Muted")
         fl.addRow(note)
@@ -330,8 +367,11 @@ class MainWindow(QMainWindow):
         # Paper trades are forced closed at the Kalshi BTC15 close time; no paper trade is allowed to survive past the 15m market.
         snap_for_trade = self.kalshi_timer.snapshot()
         expired = bool(snap_for_trade.close_time and snap_for_trade.seconds_left() <= 0)
+        before_trade = self.account.open_trade
         self.account.update(price, force_close=expired, force_reason="KALSHI_15M_END" if expired else "")
         open_trade = self.account.open_trade
+        if before_trade and not open_trade:
+            self.log_timeline("BTC15/TP/SL exit processed — waiting for new 15m read")
         if open_trade:
             risk_cash = float(open_trade.setup_meta.get("cash_stop_loss", self._cash_stop_loss())) if hasattr(open_trade, "setup_meta") else self._cash_stop_loss()
             payout_cash = float(open_trade.setup_meta.get("cash_payout", self._cash_payout())) if hasattr(open_trade, "setup_meta") else self._cash_payout()
@@ -383,6 +423,11 @@ class MainWindow(QMainWindow):
         bucket = int(time.time()) - (int(time.time()) % 900)
         if self._last_15m_bucket != bucket or self._last_15m_open is None:
             self._last_15m_bucket = bucket
+            # New Kalshi BTC15 window = fresh read. Clear per-window GAP locks so
+            # the bot starts over instead of carrying old FVG decisions forward.
+            self._used_gap_keys.clear()
+            self._ready_confirm_sig = ""
+            self._ready_confirm_count = 0
             # Prefer the first 1m candle inside this 15m window.
             inside = [c for c in self.candles.candles if int(c.ts) >= bucket]
             self._last_15m_open = float(inside[0].open) if inside else float(price)
@@ -1156,6 +1201,12 @@ class MainWindow(QMainWindow):
             )
         training_mode = hasattr(self, "mode_box") and self.mode_box.currentText().startswith("Paper Training")
         if training_mode and self.auto_paper_toggle.isChecked() and not self.account.open_trade and log_sig != self._auto_opened_signal_sig:
+            ok_to_open, wait_reason = self._ready_has_waited_enough(log_sig)
+            if not ok_to_open:
+                if wait_reason != self._last_timeline_state:
+                    self._last_timeline_state = wait_reason
+                    self.log_timeline(f"READ | {wait_reason}")
+                return
             self._auto_opened_signal_sig = log_sig
             self.open_planned_trade()
 
@@ -1284,6 +1335,39 @@ class MainWindow(QMainWindow):
             "candlestick_signal": str(getattr(d, "candlestick_signal", "")),
         }
 
+
+    def _current_candle_bucket_ts(self) -> int:
+        try:
+            if self.candles.candles:
+                return int(self.candles.candles[-1].ts)
+        except Exception:
+            pass
+        return int(time.time() // 60 * 60)
+
+    def _ready_confirmation_required(self) -> int:
+        speed = self._training_speed() if hasattr(self, "_training_speed") else "More Trades"
+        if speed.startswith("Strict"):
+            return 2
+        if speed.startswith("Max"):
+            return 0
+        return 1
+
+    def _ready_has_waited_enough(self, sig: str) -> tuple[bool, str]:
+        required = self._ready_confirmation_required()
+        if required <= 0:
+            return True, "Max Training Data: no extra wait"
+        bucket = self._current_candle_bucket_ts()
+        if sig != self._ready_confirm_sig:
+            self._ready_confirm_sig = sig
+            self._ready_confirm_candle_ts = bucket
+            self._ready_confirm_count = 0
+            return False, f"Reading setup: waiting {required} closed candle(s) before paper entry"
+        if bucket != self._ready_confirm_candle_ts:
+            self._ready_confirm_candle_ts = bucket
+            self._ready_confirm_count += 1
+        ready = self._ready_confirm_count >= required
+        return ready, f"Read confirmation candles {self._ready_confirm_count}/{required}"
+
     def open_planned_trade(self) -> None:
         plan = self.chart.trade_plan
         if not plan.get("active") or not all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
@@ -1347,11 +1431,13 @@ class MainWindow(QMainWindow):
         t = self.account.open_trade
         if t:
             self.open_trade_label.setText(
-                f"OPEN {t.direction_label()} | Size ${t.size_usd:,.2f} | Entry {t.entry:,.2f} | "
+                f"🟢 OPEN TRADE ACTIVE — {t.direction_label()} | Size ${t.size_usd:,.2f} | Entry {t.entry:,.2f} | "
                 f"Stop {t.stop:,.2f} | Target {t.target:,.2f} | {self._live_payout_line(t)}"
             )
+            self.open_trade_label.setObjectName("Green")
         else:
-            self.open_trade_label.setText("No open paper trade")
+            self.open_trade_label.setText("⚪ No open paper trade — waiting for fresh 15m read/setup")
+            self.open_trade_label.setObjectName("Muted")
         closed = [x for x in self.account.trades if x.status == "CLOSED"][-8:]
         if closed:
             lines = ["Recent closed paper trades:"]
