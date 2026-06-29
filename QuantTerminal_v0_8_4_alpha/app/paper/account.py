@@ -114,20 +114,53 @@ class PaperAccount:
         self.trades.append(trade)
         return trade
 
+    def _cash_scaled_pnl(self, trade: PaperTrade, price: float) -> float:
+        """Return live paper P/L in the user's configured small-dollar terms.
+
+        Older builds used raw spot-style P/L: BTC percent move * buy-in size.
+        That made a $20 DOWN play show only pennies while price was moving in
+        the right direction. For this paper-training terminal, stop/target are
+        the pass/fail chart levels, while cash_stop_loss/cash_payout define the
+        simulated payout curve. At target the trade shows +cash_payout; at stop
+        it shows -cash_stop_loss, with live P/L moving continuously between them.
+        """
+        target_cash = float(trade.setup_meta.get("cash_payout", 0.0) or 0.0)
+        risk_cash = float(trade.setup_meta.get("cash_stop_loss", 0.0) or 0.0)
+        if target_cash <= 0 and risk_cash <= 0:
+            # Fallback for old saved trades that do not have cash labels yet.
+            if trade.side == "LONG":
+                return (price - trade.entry) / max(trade.entry, 0.01) * trade.size_usd
+            return (trade.entry - price) / max(trade.entry, 0.01) * trade.size_usd
+        target_cash = target_cash if target_cash > 0 else trade.size_usd
+        risk_cash = risk_cash if risk_cash > 0 else trade.size_usd
+
+        if trade.side == "LONG":
+            if price >= trade.entry:
+                progress = (price - trade.entry) / max(trade.target - trade.entry, 0.0001)
+                return max(0.0, progress) * target_cash
+            progress = (trade.entry - price) / max(trade.entry - trade.stop, 0.0001)
+            return -max(0.0, progress) * risk_cash
+        else:
+            if price <= trade.entry:
+                progress = (trade.entry - price) / max(trade.entry - trade.target, 0.0001)
+                return max(0.0, progress) * target_cash
+            progress = (price - trade.entry) / max(trade.stop - trade.entry, 0.0001)
+            return -max(0.0, progress) * risk_cash
+
     def update(self, price: float, force_close: bool = False, force_reason: str = "") -> None:
         trade = self.open_trade
         if not trade:
             return
         price = float(price)
         if trade.side == "LONG":
-            unrealized = (price - trade.entry) / trade.entry * trade.size_usd
             hit_stop = price <= trade.stop
             hit_target = price >= trade.target
         else:
-            unrealized = (trade.entry - price) / trade.entry * trade.size_usd
             hit_stop = price >= trade.stop
             hit_target = price <= trade.target
         time_expired = bool(trade.expires_at and time.time() >= float(trade.expires_at))
+
+        unrealized = self._cash_scaled_pnl(trade, price)
         trade.pnl = unrealized
         trade.mfe = max(float(getattr(trade, "mfe", 0.0)), float(unrealized))
         trade.mae = min(float(getattr(trade, "mae", 0.0)), float(unrealized))
@@ -141,11 +174,13 @@ class PaperAccount:
             else:
                 trade.exit_reason = "TARGET" if hit_target else "STOP"
             trade.closed_at = time.time()
-            # Recalculate final P/L exactly from the actual exit price.
-            if trade.side == "LONG":
-                trade.pnl = (price - trade.entry) / trade.entry * trade.size_usd
-            else:
-                trade.pnl = (trade.entry - price) / trade.entry * trade.size_usd
+            trade.pnl = self._cash_scaled_pnl(trade, price)
+            # Clamp exact target/stop closes to the configured cash values. If the
+            # tick jumps beyond the line, keep the paper result comparable.
+            if trade.exit_reason == "TARGET":
+                trade.pnl = float(trade.setup_meta.get("cash_payout", trade.pnl) or trade.pnl)
+            elif trade.exit_reason == "STOP":
+                trade.pnl = -float(trade.setup_meta.get("cash_stop_loss", abs(trade.pnl)) or abs(trade.pnl))
             trade.mfe = max(float(getattr(trade, "mfe", 0.0)), float(trade.pnl))
             trade.mae = min(float(getattr(trade, "mae", 0.0)), float(trade.pnl))
             self.closed_pnl += trade.pnl

@@ -211,55 +211,126 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget(); root = QVBoxLayout(central)
-        root.setContentsMargins(10, 10, 10, 10); root.setSpacing(10)
+        root.setContentsMargins(8, 8, 8, 8); root.setSpacing(8)
 
-        top = QFrame(); top.setObjectName("Panel")
-        top_l = QHBoxLayout(top)
-        title = QLabel("BTC/USD • Coinbase"); title.setObjectName("Title")
+        top = QFrame(); top.setObjectName("TopBar")
+        top_l = QHBoxLayout(top); top_l.setContentsMargins(12, 8, 12, 8)
+        title = QLabel("QUANT TERMINAL  •  BTC15 RESEARCH"); title.setObjectName("Brand")
         top_l.addWidget(title); top_l.addStretch(); top_l.addWidget(self.price_label)
         top_l.addSpacing(20); top_l.addWidget(self.timer_label); top_l.addSpacing(20); top_l.addWidget(self.move_label); top_l.addSpacing(20); top_l.addWidget(self.feed_label)
         root.addWidget(top)
 
-        mid = QSplitter(Qt.Horizontal)
-        mid.setChildrenCollapsible(False)
-        left = self._panel("Watchlist"); left.setMinimumWidth(140); left.setMaximumWidth(360)
+        workspace = QSplitter(Qt.Horizontal)
+        workspace.setChildrenCollapsible(False)
+        workspace.setHandleWidth(7)
+
+        left = self._panel("Navigator")
+        left.setMinimumWidth(145); left.setMaximumWidth(320)
         self.watchlist = QListWidget(); self.watchlist.addItems(["Paper Trading", "Journal", "Signals", "Timeline", "Coach", "Learning", "Memory", "Backtests", "Data Health", "Kalshi", "Logs", "Settings"])
         self.watchlist.itemClicked.connect(self.on_watchlist_clicked)
-        left.layout().addWidget(self.watchlist); mid.addWidget(left)
+        left.layout().addWidget(self.watchlist)
+        workspace.addWidget(left)
 
-        chart_panel = self._panel("Live Chart")
-        chart_tools = QHBoxLayout()
+        center = QSplitter(Qt.Vertical)
+        center.setChildrenCollapsible(False)
+        center.setHandleWidth(7)
+
+        chart_panel = self._panel("Live BTC-USD Chart")
+        chart_tools = QHBoxLayout(); chart_tools.setSpacing(6)
         zoom_out = QPushButton("−"); zoom_out.clicked.connect(self.chart.zoom_out)
         zoom_in = QPushButton("+"); zoom_in.clicked.connect(self.chart.zoom_in)
         reset_view = QPushButton("Fit"); reset_view.clicked.connect(self.chart.reset_view)
         chart_tools.addWidget(QLabel("Zoom")); chart_tools.addWidget(zoom_out); chart_tools.addWidget(zoom_in); chart_tools.addWidget(reset_view)
-        clean_btn = QPushButton("Clean Chart")
+        clean_btn = QPushButton("Clean")
         clean_btn.clicked.connect(self.clean_chart_view)
-        gap_btn = QPushButton("Toggle Filled Gaps")
+        gap_btn = QPushButton("Filled gaps")
         gap_btn.clicked.connect(self.toggle_filled_gaps)
-        swing_btn = QPushButton("Toggle H/L")
+        swing_btn = QPushButton("H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.3: live payout fix • exact candle hover • compact risk zones"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.4 Pro UI • compact R/R box • cash-scaled live payout"))
         chart_panel.layout().addLayout(chart_tools)
-        chart_panel.layout().addWidget(self.chart)
-        mid.addWidget(chart_panel)
+        chart_panel.layout().addWidget(self.chart, 1)
+        center.addWidget(chart_panel)
 
-        right = self._panel("AI / Thinking")
-        right.setMinimumWidth(300); right.setMaximumWidth(650)
+        self.tabs = QTabWidget(); tabs = self.tabs
+        paper = QWidget(); paper_l = QVBoxLayout(paper)
+        paper_l.addWidget(self.stats_label)
+        paper_l.addWidget(self.open_trade_label)
+        paper_l.addWidget(self.trades_box, 1)
+        audit_tab = QWidget(); audit_l = QVBoxLayout(audit_tab)
+        audit_l.addWidget(QLabel("Paper Journal / Trade Audit — verifies wins by TARGET and losses by STOP"))
+        audit_l.addWidget(self.audit_box, 1)
+        logs = QWidget(); logs_l = QVBoxLayout(logs); logs_l.addWidget(self.log_box, 1)
+        learning_tab = QWidget(); learning_l = QVBoxLayout(learning_tab)
+        learning_l.addWidget(self.learning_toggle)
+        learning_l.addWidget(self.learning_box, 1)
+        memory_tab = QWidget(); memory_l = QVBoxLayout(memory_tab)
+        memory_l.addWidget(QLabel("Memory Stats — similarity scoring + learned paper outcomes"))
+        memory_l.addWidget(self.memory_stats_box, 1)
+        tune_btn = QPushButton("Apply Safe Auto-Tune")
+        tune_btn.clicked.connect(self.apply_auto_tune)
+        memory_l.addWidget(tune_btn)
+        memory_l.addWidget(self.auto_tune_box, 1)
+        backtest_tab = QWidget(); backtest_l = QVBoxLayout(backtest_tab)
+        run_backtest = QPushButton("Run FVG Replay Backtest")
+        run_backtest.clicked.connect(self.run_replay_backtest)
+        export_btn = QPushButton("Export Paper Report")
+        export_btn.clicked.connect(self.export_paper_report)
+        backtest_l.addWidget(run_backtest)
+        backtest_l.addWidget(export_btn)
+        backtest_l.addWidget(self.backtest_box, 1)
+        signal_tab = QWidget(); signal_l = QVBoxLayout(signal_tab); signal_l.addWidget(self.signal_box, 1)
+        timeline_tab = QWidget(); timeline_l = QVBoxLayout(timeline_tab)
+        timeline_l.addWidget(QLabel("Signal Timeline — step-by-step reasoning trail for each setup"))
+        timeline_l.addWidget(self.timeline_box, 1)
+        coach_tab = QWidget(); coach_l = QVBoxLayout(coach_tab)
+        coach_l.addWidget(QLabel("Logic Coach — confidence breakdown, safety rules, and setup state"))
+        coach_l.addWidget(self.coach_box, 1)
+        data_tab = QWidget(); data_l = QVBoxLayout(data_tab)
+        data_l.addWidget(QLabel("Feed Accuracy / Data Health — warns if Coinbase, candles, Kalshi timer, or odds are stale"))
+        data_l.addWidget(self.data_health_box, 1)
+        kalshi_tab = QWidget(); kalshi_l = QVBoxLayout(kalshi_tab)
+        apply_kalshi = QPushButton("Sync this Kalshi URL")
+        apply_kalshi.clicked.connect(self.apply_kalshi_url)
+        kalshi_l.addWidget(QLabel("Kalshi BTC15 URL — category page is best for live sync"))
+        kalshi_l.addWidget(self.kalshi_url_box)
+        kalshi_l.addWidget(apply_kalshi)
+        kalshi_l.addWidget(self.kalshi_debug_box, 1)
+        tabs.addTab(paper, "Paper Trading")
+        tabs.addTab(audit_tab, "Paper Journal / Audit")
+        tabs.addTab(signal_tab, "Signal Journal")
+        tabs.addTab(timeline_tab, "Signal Timeline")
+        tabs.addTab(coach_tab, "Logic Coach")
+        tabs.addTab(learning_tab, "Learning")
+        tabs.addTab(memory_tab, "Memory Stats")
+        tabs.addTab(backtest_tab, "Backtest / Replay")
+        tabs.addTab(data_tab, "Data Health")
+        tabs.addTab(kalshi_tab, "Kalshi Debug")
+        tabs.addTab(logs, "Logs")
+        center.addWidget(tabs)
+        center.setSizes([610, 240])
+        workspace.addWidget(center)
+
+        right = self._panel("AI / Thinking + Paper Controls")
+        right.setMinimumWidth(330)
+        right_split = QSplitter(Qt.Vertical)
+        right_split.setChildrenCollapsible(False)
+        right_split.setHandleWidth(7)
         decision_tabs = QTabWidget()
         decision_tabs.addTab(self.ai_box, "Decision")
-        decision_tabs.addTab(self.thinking_box, "Thinking Checklist")
-        decision_tabs.addTab(self.coach_box, "Logic Coach")
-        right.layout().addWidget(decision_tabs)
+        decision_tabs.addTab(self.thinking_box, "Checklist")
+        decision_tabs.addTab(self.coach_box, "Coach")
+        right_split.addWidget(decision_tabs)
 
         planner = QFrame(); planner.setObjectName("Panel")
         fl = QFormLayout(planner)
-        direction_label = QLabel("Direction: AUTO from chart (UP/LONG or DOWN/SHORT)")
+        fl.setContentsMargins(10, 10, 10, 10); fl.setSpacing(8)
+        direction_label = QLabel("Direction: AUTO from chart")
         direction_label.setObjectName("Title")
         fl.addRow(direction_label)
-        side_help = QLabel("UP/LONG = paper buy when chart favors up. DOWN/SHORT = paper sell when chart favors down. On Kalshi this maps to Up/Down style thinking.")
-        side_help.setObjectName("Muted")
+        side_help = QLabel("UP/LONG = buy when chart favors up. DOWN/SHORT = sell when chart favors down. Bot pauses new reads while a trade is active.")
+        side_help.setObjectName("Muted"); side_help.setWordWrap(True)
         fl.addRow(side_help)
         fl.addRow("Mode", self.mode_box)
         fl.addRow("Training speed", self.training_speed_box)
@@ -272,69 +343,18 @@ class MainWindow(QMainWindow):
         save_settings_btn = QPushButton("Save paper settings")
         save_settings_btn.clicked.connect(self.save_trading_ui_settings)
         fl.addRow(save_settings_btn)
-        note = QLabel("Training mode auto-opens after READY. More Trades = balanced. Max Training Data adds labeled scout probes. Strict Quality waits for cleaner CHoCH/FVG.")
-        note.setObjectName("Muted")
+        note = QLabel("Each BTC15 starts a fresh read. More Trades waits a few candles; Max Data enters faster but labels probes separately.")
+        note.setObjectName("Muted"); note.setWordWrap(True)
         fl.addRow(note)
-        right.layout().addWidget(planner)
-        mid.addWidget(right)
-        mid.setSizes([180, 900, 420])
-        root.addWidget(mid, 1)
-
-        self.tabs = QTabWidget()
-        tabs = self.tabs
-        paper = QWidget(); paper_l = QVBoxLayout(paper)
-        paper_l.addWidget(self.stats_label); paper_l.addWidget(self.open_trade_label); paper_l.addWidget(self.trades_box); paper_l.addStretch()
-        audit_tab = QWidget(); audit_l = QVBoxLayout(audit_tab)
-        audit_l.addWidget(QLabel("Paper Journal / Trade Audit — verifies wins by TARGET and losses by STOP"))
-        audit_l.addWidget(self.audit_box)
-        logs = QWidget(); logs_l = QVBoxLayout(logs); logs_l.addWidget(self.log_box)
-        learning_tab = QWidget(); learning_l = QVBoxLayout(learning_tab)
-        learning_l.addWidget(self.learning_toggle)
-        learning_l.addWidget(self.learning_box)
-        memory_tab = QWidget(); memory_l = QVBoxLayout(memory_tab)
-        memory_l.addWidget(QLabel("Memory Stats — similarity scoring + learned paper outcomes"))
-        memory_l.addWidget(self.memory_stats_box)
-        tune_btn = QPushButton("Apply Safe Auto-Tune")
-        tune_btn.clicked.connect(self.apply_auto_tune)
-        memory_l.addWidget(tune_btn)
-        memory_l.addWidget(self.auto_tune_box)
-        backtest_tab = QWidget(); backtest_l = QVBoxLayout(backtest_tab)
-        run_backtest = QPushButton("Run FVG Replay Backtest")
-        run_backtest.clicked.connect(self.run_replay_backtest)
-        export_btn = QPushButton("Export Paper Report")
-        export_btn.clicked.connect(self.export_paper_report)
-        backtest_l.addWidget(run_backtest)
-        backtest_l.addWidget(export_btn)
-        backtest_l.addWidget(self.backtest_box)
-        signal_tab = QWidget(); signal_l = QVBoxLayout(signal_tab); signal_l.addWidget(self.signal_box)
-        timeline_tab = QWidget(); timeline_l = QVBoxLayout(timeline_tab)
-        timeline_l.addWidget(QLabel("Signal Timeline — step-by-step reasoning trail for each setup"))
-        timeline_l.addWidget(self.timeline_box)
-        coach_tab = QWidget(); coach_l = QVBoxLayout(coach_tab)
-        coach_l.addWidget(QLabel("Logic Coach — confidence breakdown, safety rules, and setup state"))
-        coach_l.addWidget(self.coach_box)
-        data_tab = QWidget(); data_l = QVBoxLayout(data_tab)
-        data_l.addWidget(QLabel("Feed Accuracy / Data Health — warns if Coinbase, candles, Kalshi timer, or odds are stale"))
-        data_l.addWidget(self.data_health_box)
-        kalshi_tab = QWidget(); kalshi_l = QVBoxLayout(kalshi_tab)
-        apply_kalshi = QPushButton("Sync this Kalshi URL")
-        apply_kalshi.clicked.connect(self.apply_kalshi_url)
-        kalshi_l.addWidget(QLabel("Kalshi BTC15 URL — category page is best for live sync"))
-        kalshi_l.addWidget(self.kalshi_url_box)
-        kalshi_l.addWidget(apply_kalshi)
-        kalshi_l.addWidget(self.kalshi_debug_box)
-        tabs.addTab(paper, "Paper Trading")
-        tabs.addTab(audit_tab, "Paper Journal / Audit")
-        tabs.addTab(signal_tab, "Signal Journal")
-        tabs.addTab(timeline_tab, "Signal Timeline")
-        tabs.addTab(coach_tab, "Logic Coach")
-        tabs.addTab(learning_tab, "Learning")
-        tabs.addTab(memory_tab, "Memory Stats")
-        tabs.addTab(backtest_tab, "Backtest / Replay")
-        tabs.addTab(data_tab, "Data Health")
-        tabs.addTab(kalshi_tab, "Kalshi Debug")
-        tabs.addTab(logs, "Logs")
-        root.addWidget(tabs, 0)
+        right_split.addWidget(planner)
+        right_split.setSizes([620, 260])
+        right.layout().addWidget(right_split)
+        workspace.addWidget(right)
+        workspace.setSizes([170, 960, 430])
+        workspace.setStretchFactor(0, 0)
+        workspace.setStretchFactor(1, 1)
+        workspace.setStretchFactor(2, 0)
+        root.addWidget(workspace, 1)
         self.setCentralWidget(central)
 
     def seed_historical_candles(self) -> None:
@@ -932,11 +952,20 @@ class MainWindow(QMainWindow):
         }
 
     def _plan_cash_summary(self, side: str, entry: float, stop: float, target: float) -> str:
-        m = self._cash_metrics_from_prices(side, entry, stop, target)
+        # The visible cash plan is user-configured, not derived from spot % move.
+        # Stop/target chart lines decide pass/fail; this cash line decides the paper payout scale.
+        m = self._configured_cash_metrics()
+        entry = max(float(entry), 0.01)
+        if str(side).upper() == "LONG":
+            stop_pct = max(0.0, (entry - float(stop)) / entry * 100.0)
+            target_pct = max(0.0, (float(target) - entry) / entry * 100.0)
+        else:
+            stop_pct = max(0.0, (float(stop) - entry) / entry * 100.0)
+            target_pct = max(0.0, (entry - float(target)) / entry * 100.0)
         return (
             f"RR {m['rr']:.2f}:1 | buy-in ${m['size']:,.2f} | "
             f"risk ${m['stop_loss']:,.2f} | payout ${m['payout']:,.2f} | "
-            f"moves {m['stop_pct']:.3f}% / {m['payout_pct']:.3f}%"
+            f"chart move stop {stop_pct:.3f}% / target {target_pct:.3f}%"
         )
 
     def _update_plan_rr_label(self, side: str, entry: float, stop: float, target: float) -> None:
@@ -947,35 +976,49 @@ class MainWindow(QMainWindow):
             )
         self._update_ratio_label(side, entry, stop, target)
 
-    def _configured_plan_values(self, d):
-        """Apply user buy-in/stop/payout controls to the strategy plan.
+    def _recent_price_risk_distance(self, entry: float, planned_stop: float | None = None) -> float:
+        """Pick a visible, tradeable BTC stop distance for the current 15m window.
 
-        The strategy decides WHEN and DIRECTION. The controls decide HOW MUCH
-        cash to paper-risk and how much cash profit to target. RR is calculated
-        from payout ÷ stop loss, not typed directly.
+        Cash risk/payout are controlled separately by Stop loss USD / Target payout
+        USD. Chart stop/target levels should be close enough to monitor inside a
+        BTC15 trade, not thousands of dollars away because of a $20 buy-in.
+        """
+        entry = max(float(entry), 0.01)
+        ranges = []
+        try:
+            recent = self.candles.candles[-14:]
+            ranges = [abs(c.high - c.low) for c in recent if c.high > c.low]
+        except Exception:
+            ranges = []
+        avg_range = sum(ranges) / len(ranges) if ranges else entry * 0.001
+        base = max(avg_range * 0.85, entry * 0.00045, 8.0)
+        if planned_stop and planned_stop > 1:
+            base = max(base, abs(entry - float(planned_stop)) * 0.55)
+        # Clamp so levels are visible and realistic for a 15m scout.
+        return max(entry * 0.00035, min(base, entry * 0.0035))
+
+    def _configured_plan_values(self, d):
+        """Apply user cash controls to a compact BTC15 chart plan.
+
+        The strategy decides WHEN and DIRECTION. The side panel decides cash
+        buy-in, cash stop, and cash payout. The chart lines use recent BTC
+        volatility so stop/target can be watched inside the 15m window. Live P/L
+        is then scaled to the cash stop/payout values.
         """
         if not d or not getattr(d, "plan", None):
             return None
         side = d.plan.side
         entry = float(d.plan.entry)
-        size = self._cash_size()
-        stop_loss_usd = self._cash_stop_loss()
-        payout_usd = self._cash_payout()
-        # Convert desired paper cash risk/reward into BTC price levels.
-        # Cap the stop distance so a typo like $500 stop on a $20 buy-in doesn't
-        # produce a negative BTC price level.
-        risk_pct = min(stop_loss_usd / size, 0.95)
-        payout_pct = max(payout_usd / size, 0.000001)
-        risk = max(entry * risk_pct, 0.01)
-        reward = max(entry * payout_pct, 0.01)
-        rr = payout_usd / max(stop_loss_usd, 0.01)
+        cash_rr = self._cash_payout() / max(self._cash_stop_loss(), 0.01)
+        base_risk = self._recent_price_risk_distance(entry, getattr(d.plan, "stop", None))
+        reward = max(base_risk * cash_rr, entry * 0.00025)
         if side == "LONG":
-            stop = max(0.01, entry - risk)
+            stop = max(0.01, entry - base_risk)
             target = entry + reward
         else:
-            stop = entry + risk
+            stop = entry + base_risk
             target = max(0.01, entry - reward)
-        return side, entry, stop, target, rr
+        return side, entry, stop, target, cash_rr
 
     def _current_display_plan(self, d=None):
         """Prefer the visible chart plan; otherwise build one from the current setup."""
@@ -983,7 +1026,7 @@ class MainWindow(QMainWindow):
         if plan.get("active") and all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
             side = str(plan.get("side", "LONG"))
             entry = float(plan["entry"]); stop = float(plan["stop"]); target = float(plan["target"])
-            rr = self._cash_metrics_from_prices(side, entry, stop, target)["rr"]
+            rr = self._configured_cash_metrics()["rr"]
             return side, entry, stop, target, rr
         return self._configured_plan_values(d)
 
@@ -1183,7 +1226,7 @@ class MainWindow(QMainWindow):
         visual_sig = f"{gap_key}:{side}:{entry:.2f}:{stop:.2f}:{target:.2f}:{self._cash_size():.2f}:{self._cash_stop_loss():.2f}:{self._cash_payout():.2f}"
         self.side_box.setCurrentText(side)
         if visual_sig != self._last_auto_plan_sig:
-            self.chart.set_plan(side, entry, stop, target, active=True, mode="plan")
+            self.chart.set_plan(side, entry, stop, target, active=True, mode="plan", emit=False)
             self._update_plan_rr_label(side, entry, stop, target)
             self._last_auto_plan_sig = visual_sig
             self._planned_gap_key = gap_key
@@ -1269,11 +1312,9 @@ class MainWindow(QMainWindow):
         if self.candles.candles and self.chart.trade_plan.get("active"):
             side = self.side_box.currentText()
             entry = self.entry_price_box.value() if self.entry_price_box.value() > 1 else self.candles.candles[-1].close
-            size = self._cash_size()
-            stop_loss_usd = self._cash_stop_loss()
-            payout_usd = self._cash_payout()
-            risk = max(entry * min(stop_loss_usd / size, 0.95), 0.01)
-            reward = max(entry * max(payout_usd / size, 0.000001), 0.01)
+            cash_rr = self._cash_payout() / max(self._cash_stop_loss(), 0.01)
+            risk = self._recent_price_risk_distance(entry, self.stop_price_box.value() if self.stop_price_box.value() > 1 else None)
+            reward = max(risk * cash_rr, entry * 0.00025)
             if side == "LONG":
                 stop = max(0.01, entry - risk); target = entry + reward
             else:
@@ -1346,11 +1387,13 @@ class MainWindow(QMainWindow):
 
     def _ready_confirmation_required(self) -> int:
         speed = self._training_speed() if hasattr(self, "_training_speed") else "More Trades"
+        # Fresh BTC15 read rule: even aggressive modes should see at least one
+        # closed 1m candle inside the active window before opening paper.
         if speed.startswith("Strict"):
-            return 2
+            return 3
         if speed.startswith("Max"):
-            return 0
-        return 1
+            return 1
+        return 2
 
     def _ready_has_waited_enough(self, sig: str) -> tuple[bool, str]:
         required = self._ready_confirmation_required()
@@ -1383,14 +1426,14 @@ class MainWindow(QMainWindow):
                 float(plan["stop"]),
                 float(plan["target"]),
                 self._cash_size(),
-                f"{getattr(self.last_decision, 'entry_model', 'FVG setup')} | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | {getattr(self.last_decision, 'trigger_quality', 'trigger')} | confidence {self.last_decision.confidence}% | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} RR {self._cash_metrics_from_prices(str(plan.get('side', 'LONG')), float(plan['entry']), float(plan['stop']), float(plan['target']))['rr']:.2f}:1",
+                f"{getattr(self.last_decision, 'entry_model', 'FVG setup')} | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | {getattr(self.last_decision, 'trigger_quality', 'trigger')} | confidence {self.last_decision.confidence}% | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} RR {self._configured_cash_metrics()['rr']:.2f}:1",
                 expires_at=self.kalshi_timer.snapshot().close_time.timestamp() if self.kalshi_timer.snapshot().close_time else None,
                 setup_meta=self._setup_meta_for_trade()
             )
             if self._planned_gap_key:
                 self._used_gap_keys.add(self._planned_gap_key)
             self.chart.set_cash_metrics(self._cash_size(), self._cash_stop_loss(), self._cash_payout())
-            self.chart.set_plan(str(plan.get("side", "LONG")), float(plan["entry"]), float(plan["stop"]), float(plan["target"]), active=True, mode="trade")
+            self.chart.set_plan(str(plan.get("side", "LONG")), float(plan["entry"]), float(plan["stop"]), float(plan["target"]), active=True, mode="trade", emit=False)
             exp = self.kalshi_timer.snapshot().label()
             self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f} | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} | expires BTC15 {exp}")
             self.log_timeline(f"OPENED PAPER {plan.get('side')} | entry {float(plan['entry']):,.2f} | expires BTC15 {exp}")

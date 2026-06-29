@@ -391,37 +391,49 @@ class ChartWidget(QGraphicsView):
         y_stop_raw = self._y(stop)
         y_target_raw = self._y(target)
         y_entry = max(self._plot.top() + 2, min(self._plot.bottom() - 2, y_entry_raw))
-        y_stop = max(self._plot.top() + 2, min(self._plot.bottom() - 2, y_stop_raw))
-        y_target = max(self._plot.top() + 2, min(self._plot.bottom() - 2, y_target_raw))
 
-        # Transparent risk/reward zones meet at the buy-in line, but are visually
-        # capped. A $20 paper buy-in with a $1 payout can translate to a huge BTC
-        # price distance; drawing that full distance makes the chart unreadable.
-        # The actual stop/target price lines still show the real pass/fail levels.
-        green = QColor("#22c55e"); green.setAlpha(22)
-        red = QColor("#ef4444"); red.setAlpha(22)
+        # v0.8.4 professional chart overlay:
+        # - risk/reward boxes are compact presentation boxes, not full-screen washes
+        # - stop/target lines sit at the top/bottom edge of those boxes
+        # - the real trade still uses stop/target prices; the box is just a clean visual
+        # - the boxes stay visible and do not disappear when actual price levels are far
+        max_zone = max(28.0, min(82.0, self._plot.height() * 0.16))
+        min_zone = 18.0
 
-        def capped_zone_y(raw_y: float, entry_y: float) -> float:
-            max_zone = max(24.0, self._plot.height() * 0.22)
-            delta = max(-max_zone, min(max_zone, raw_y - entry_y))
-            return max(self._plot.top() + 2, min(self._plot.bottom() - 2, entry_y + delta))
+        def compact_edge(raw_y: float, entry_y: float) -> float:
+            if abs(raw_y - entry_y) < 0.5:
+                return entry_y
+            direction = 1.0 if raw_y > entry_y else -1.0
+            dist = min(max_zone, max(min_zone, abs(raw_y - entry_y)))
+            return max(self._plot.top() + 2, min(self._plot.bottom() - 2, entry_y + direction * dist))
 
-        zy_target = capped_zone_y(y_target_raw, y_entry)
-        zy_stop = capped_zone_y(y_stop_raw, y_entry)
-        self.scene.addRect(QRectF(self._plot.left(), min(y_entry, zy_target), self._plot.width(), max(2, abs(zy_target - y_entry))), QPen(Qt.NoPen), QBrush(green))
-        self.scene.addRect(QRectF(self._plot.left(), min(y_entry, zy_stop), self._plot.width(), max(2, abs(zy_stop - y_entry))), QPen(Qt.NoPen), QBrush(red))
+        y_target = compact_edge(y_target_raw, y_entry)
+        y_stop = compact_edge(y_stop_raw, y_entry)
+        green = QColor("#22c55e"); green.setAlpha(30)
+        red = QColor("#ef4444"); red.setAlpha(30)
+        green_border = QColor("#22c55e"); green_border.setAlpha(120)
+        red_border = QColor("#ef4444"); red_border.setAlpha(120)
+
+        # Keep zones near the current/entry area on the right side like a pro R/R box.
+        zone_w = min(max(170.0, self._plot.width() * 0.26), 320.0)
+        x2 = self._plot.right() - 8
+        x1 = x2 - zone_w
+        self.scene.addRect(QRectF(x1, min(y_entry, y_target), zone_w, max(2, abs(y_target - y_entry))), QPen(green_border, 1), QBrush(green))
+        self.scene.addRect(QRectF(x1, min(y_entry, y_stop), zone_w, max(2, abs(y_stop - y_entry))), QPen(red_border, 1), QBrush(red))
 
         def line(key: str, raw_y: float, y: float, price: float, color: str, label: str, cash: str = "") -> None:
             visible = self._plot.top() <= raw_y <= self._plot.bottom()
-            pen = QPen(QColor(color), 2.4 if key == self.drag_line else 1.6, Qt.SolidLine if visible else Qt.DashLine)
+            pen = QPen(QColor(color), 2.6 if key == self.drag_line else 1.8, Qt.SolidLine)
+            # Stop/target/entry line spans across chart so you can see if price passes it.
             self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
-            arrow = "" if visible else (" ↑" if raw_y < self._plot.top() else " ↓")
+            arrow = "" if visible else (" real↑" if raw_y < self._plot.top() else " real↓")
             label_text = f"{label}{arrow} {price:,.2f}"
             if cash:
                 label_text += f"  {cash}"
-            width = min(220, 16 + len(label_text) * 7)
-            self.scene.addRect(self._plot.right() - width - 4, y - 12, width, 24, QPen(QColor(color), 1), QBrush(QColor("#111827")))
-            self._text(self._plot.right() - width + 2, y - 9, label_text, color, 8)
+            width = min(235, 16 + len(label_text) * 7)
+            box_x = x2 - width
+            self.scene.addRect(box_x, y - 12, width, 24, QPen(QColor(color), 1), QBrush(QColor("#0b1220")))
+            self._text(box_x + 6, y - 9, label_text, color, 8)
 
         entry_label = "ENTRY" if mode == "trade" else "BUY-IN"
         payout_cash = f"+${self.cash_payout_usd:,.2f}" if self.cash_payout_usd else ""
@@ -432,8 +444,7 @@ class ChartWidget(QGraphicsView):
 
         rr = float(self.trade_plan.get("rr") or 0)
         title = "OPEN PAPER TRADE" if mode == "trade" else "AUTO PLAN"
-        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • Ratio {rr:.2f}:1 • green=target red=stop", "#d1d5db", 10)
-
+        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • Ratio {rr:.2f}:1 • compact R/R box", "#d1d5db", 10)
 
 
     def _draw_live_price(self) -> None:
