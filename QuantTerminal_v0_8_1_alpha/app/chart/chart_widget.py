@@ -178,16 +178,26 @@ class ChartWidget(QGraphicsView):
     def _price_range(self, candles: list[Candle]) -> tuple[float, float]:
         hi = max(c.high for c in candles)
         lo = min(c.low for c in candles)
+        # Keep the candle view readable. Earlier builds included far-away
+        # cash-derived stop/target levels in the y-axis range; a $20 buy-in with
+        # a $1 target can translate into thousands of BTC-price dollars, making
+        # the candle bodies look flat. The chart now scales primarily to candles
+        # and only includes plan lines when they are near the visible market.
+        candle_range = max(hi - lo, 1.0)
         if self.trade_plan.get("active"):
+            center = (hi + lo) / 2.0
+            allowed_span = candle_range * 2.5
             for key in ("entry", "stop", "target"):
                 val = self.trade_plan.get(key)
                 if isinstance(val, (int, float)):
-                    hi = max(hi, float(val))
-                    lo = min(lo, float(val))
+                    v = float(val)
+                    if abs(v - center) <= allowed_span:
+                        hi = max(hi, v)
+                        lo = min(lo, v)
         if hi == lo:
             hi += 1
             lo -= 1
-        pad = max((hi - lo) * 0.10, 1.0)
+        pad = max((hi - lo) * 0.12, 1.0)
         return hi + pad, lo - pad
 
     def _x(self, local_index: int, count: int) -> float:
@@ -367,15 +377,25 @@ class ChartWidget(QGraphicsView):
         mode = str(self.trade_plan.get("mode") or "plan")
         entry_label = "ENTRY" if mode == "trade" else "BUY-IN"
         vals = [("target", float(target), "#2563eb", "TARGET"), ("entry", float(entry), "#e5e7eb", entry_label), ("stop", float(stop), "#dc2626", "STOP")]
+        offscreen = []
         for key, price, color, label in vals:
-            y = self._y(price)
+            raw_y = self._y(price)
+            visible = self._plot.top() <= raw_y <= self._plot.bottom()
+            y = max(self._plot.top() + 4, min(self._plot.bottom() - 4, raw_y))
             pen = QPen(QColor(color), 2 if key == self.drag_line else 1.4)
-            self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
-            self.scene.addRect(self._plot.right() - 92, y - 11, 88, 22, QPen(QColor(color), 1), QBrush(QColor("#111827")))
-            self._text(self._plot.right() - 88, y - 8, f"{label} {price:,.0f}", color, 8)
+            if visible:
+                self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
+                self.scene.addRect(self._plot.right() - 92, y - 11, 88, 22, QPen(QColor(color), 1), QBrush(QColor("#111827")))
+                self._text(self._plot.right() - 88, y - 8, f"{label} {price:,.0f}", color, 8)
+            else:
+                arrow = "↑" if raw_y < self._plot.top() else "↓"
+                offscreen.append(f"{label} {arrow} {price:,.0f}")
+                self.scene.addRect(self._plot.right() - 104, y - 10, 100, 20, QPen(QColor(color), 1), QBrush(QColor("#111827")))
+                self._text(self._plot.right() - 100, y - 7, f"{label} {arrow}", color, 8)
         rr = float(self.trade_plan.get("rr") or 0)
         title = "OPEN PAPER TRADE" if mode == "trade" else "AUTO PLAN"
-        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • RR {rr:.2f}:1", "#d1d5db", 10)
+        extra = "" if not offscreen else " • far line clipped"
+        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • RR {rr:.2f}:1{extra}", "#d1d5db", 10)
 
 
     def _draw_live_price(self) -> None:

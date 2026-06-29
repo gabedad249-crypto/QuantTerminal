@@ -312,11 +312,16 @@ class MainWindow(QMainWindow):
         if self.latest_price is None:
             return
         price = self.latest_price
-        self.feed_label.setText("● LIVE")
+        src = getattr(self.feed, "last_source", "LIVE")
+        self.feed_label.setText(f"● LIVE {src}")
         self.feed_label.setObjectName("Green")
-        self.price_label.setText(f"Price: ${price:,.2f}")
+        self.price_label.setText(f"BTC-USD: ${price:,.2f}")
         self.update_btc15_move(price)
         candles = self.candles.update_price(price)
+        # Keep chart candle data current on every tick so the LIVE label and last candle
+        # use the same price. Full FVG recalculation is still throttled below.
+        if hasattr(self.chart, "candles"):
+            self.chart.candles = candles[-800:]
         # Paper trades are forced closed at the Kalshi BTC15 close time; no paper trade is allowed to survive past the 15m market.
         snap_for_trade = self.kalshi_timer.snapshot()
         expired = bool(snap_for_trade.close_time and snap_for_trade.seconds_left() <= 0)
