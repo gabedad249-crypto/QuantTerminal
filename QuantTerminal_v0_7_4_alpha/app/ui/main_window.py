@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         self.auto_paper_toggle = QCheckBox("Auto-open paper when ready")
         self.auto_paper_toggle.setChecked(True)
         self.mode_box = QComboBox(); self.mode_box.addItems(["Paper Training (auto paper)", "Recommend Only (alerts)"])
+        self.training_speed_box = QComboBox(); self.training_speed_box.addItems(["More Trades", "Strict Quality", "Max Training Data"]); self.training_speed_box.setCurrentText("More Trades")
         self.kalshi_url_box = QLineEdit(settings.get("kalshi_market_url", "https://kalshi.com/category/crypto/btc?frequency=fifteen_min"))
         self.kalshi_url_box.setPlaceholderText("Paste Kalshi BTC15 market URL")
 
@@ -142,6 +143,7 @@ class MainWindow(QMainWindow):
         self.stop_price_box.valueChanged.connect(self.on_plan_inputs_changed)
         self.target_price_box.valueChanged.connect(self.on_plan_inputs_changed)
         self.mode_box.currentTextChanged.connect(self.on_mode_changed)
+        self.training_speed_box.currentTextChanged.connect(self.on_training_speed_changed)
         self.auto_paper_toggle.stateChanged.connect(self.on_mode_changed)
         self._update_configured_rr_label()
 
@@ -203,7 +205,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("Toggle H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.7.3: 5m bias → 1m execution • paper probes • trade diagnostics"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.7.4: trade frequency control • scout probes • CHoCH/FVG training"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart)
         mid.addWidget(chart_panel)
@@ -225,13 +227,14 @@ class MainWindow(QMainWindow):
         side_help.setObjectName("Muted")
         fl.addRow(side_help)
         fl.addRow("Mode", self.mode_box)
+        fl.addRow("Training speed", self.training_speed_box)
         fl.addRow("Buy-in USD", self.size_box)
         fl.addRow("Stop loss USD", self.stop_box)
         fl.addRow("Target payout USD", self.rr_box)
         fl.addRow("Min setup RR filter", self.min_rr_box)
         fl.addRow("Ratio", self.plan_rr_label)
         fl.addRow("Auto paper", self.auto_paper_toggle)
-        note = QLabel("Training mode auto-opens paper trades only after READY. 0.50 means fifty cents. Ratio updates from target payout ÷ stop loss. Chart lines show entry/stop/target.")
+        note = QLabel("Training mode auto-opens after READY. More Trades = balanced. Max Training Data adds labeled scout probes. Strict Quality waits for cleaner CHoCH/FVG.")
         note.setObjectName("Muted")
         fl.addRow(note)
         right.layout().addWidget(planner)
@@ -340,9 +343,9 @@ class MainWindow(QMainWindow):
 
         try:
             snap_ctx = self.kalshi_timer.snapshot()
-            self.setup_engine.configure_context(self._used_gap_keys, snap_ctx.seconds_left())
+            self.setup_engine.configure_context(self._used_gap_keys, snap_ctx.seconds_left(), self._training_speed())
         except Exception:
-            self.setup_engine.configure_context(self._used_gap_keys, None)
+            self.setup_engine.configure_context(self._used_gap_keys, None, self._training_speed())
         self.last_decision = self.setup_engine.evaluate(candles)
         self.learning.record_snapshot(price, self.last_decision)
         self.auto_manage_signal_plan()
@@ -486,7 +489,7 @@ class MainWindow(QMainWindow):
             recommend_line = f"\nRecommend Only: alert this setup, do not auto-paper. Suggested cash plan = {configured_cash_line}."
 
         ai_text = (
-            f"FVG Logic Engine v0.7.3\n\n"
+            f"FVG Logic Engine v0.7.4\n\n"
             f"State\n{getattr(d, 'state', 'UNKNOWN')}\n\n"
             f"Decision\n{('READY ' + d.side) if d.ready else 'WAIT'}\n\n"
             f"Grade / Confidence\n{d.grade} / {d.confidence}%\n\n"
@@ -494,6 +497,7 @@ class MainWindow(QMainWindow):
             f"15m Trend\n{d.trend_15m}\n\n"
             f"5m Trend\n{d.trend_5m}\n\n"
             f"Entry Model\n{getattr(d, 'entry_model', 'FVG')}\n\n"
+            f"Training Speed\n{self._training_speed()}\n\n"
             f"5m Bias\n{getattr(d, 'higher_tf_bias', 'WAIT')}\n\n"
             f"Trigger Quality\n{getattr(d, 'trigger_quality', 'Waiting')} {'(paper probe)' if getattr(d, 'training_probe', False) else ''}\n\n"
             f"Session\n{getattr(d, 'session_label', 'Unknown')}\n\n"
@@ -504,7 +508,7 @@ class MainWindow(QMainWindow):
             f"Configured Cash RR\n{configured_cash_line}\n\n"
             f"Auto Plan\n{plan_note}{recommend_line}\n\n"
             f"Why Waiting / Why Ready\n{reasons}\n\n"
-            f"Hard Rule\nNo buy-in unless state = READY. In Paper Training, B-grade 5m→1m probes are allowed so the bot can collect learning data."
+            f"Hard Rule\nNo buy-in unless state = READY. In Paper Training, B-grade probes and optional scout probes are labeled so the bot can collect learning data."
         )
         self._set_text_stable(self.ai_box, ai_text, "_last_ai_text")
         self.update_thinking_panel(d)
@@ -542,7 +546,6 @@ class MainWindow(QMainWindow):
             f"Current State: {getattr(d, 'state', 'UNKNOWN')}\n"
             f"Entry Model: {getattr(d, 'entry_model', 'FVG')}\n"
             f"5m Bias: {getattr(d, 'higher_tf_bias', 'WAIT')} | Trigger: {getattr(d, 'trigger_quality', 'Waiting')}\n"
-            f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
             f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
             f"Setup Signature: {getattr(d, 'setup_signature', '') or 'None yet'}\n\n"
             "Question Process\n"
@@ -583,7 +586,6 @@ class MainWindow(QMainWindow):
             f"Session: {getattr(d, 'session_label', 'Unknown')}\n"
             f"Entry Model: {getattr(d, 'entry_model', 'FVG')}\n"
             f"5m Bias: {getattr(d, 'higher_tf_bias', 'WAIT')} | Trigger: {getattr(d, 'trigger_quality', 'Waiting')}\n"
-            f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
             f"Sequence: {getattr(d, 'trigger_sequence', 'Waiting')}\n"
             f"Focused GAP: {getattr(d, 'latest_fvg', 'None')}\n\n"
             "What must happen next\n"
@@ -672,6 +674,23 @@ class MainWindow(QMainWindow):
             self._last_auto_plan_sig = ""
             self._last_auto_log_sig = ""
 
+
+
+    def _training_speed(self) -> str:
+        return self.training_speed_box.currentText() if hasattr(self, "training_speed_box") else "More Trades"
+
+    def on_training_speed_changed(self) -> None:
+        speed = self._training_speed()
+        try:
+            self.setup_engine.training_speed = speed
+            self.setup_engine._apply_training_speed()
+        except Exception:
+            pass
+        self._last_auto_plan_sig = ""
+        self._last_auto_log_sig = ""
+        self.log(f"Training speed set: {speed}")
+        if self.latest_price is not None and not self.account.open_trade:
+            self.update_ai(float(self.latest_price))
 
     def on_mode_changed(self) -> None:
         """Keep training/recommend mode obvious and deterministic."""
@@ -1301,7 +1320,7 @@ class MainWindow(QMainWindow):
             f"Session P/L: ${total_pnl:,.2f}\n"
             f"Best trade: ${best:,.2f}\n"
             f"Worst trade: ${worst:,.2f}\n\n"
-            "v0.7.3: 5m bias -> 1m execution, paper-training probes, one-GAP lifecycle, and guardrailed auto-tune are active."
+            "v0.7.4: trade frequency control, scout probes, CHoCH/FVG model, and guardrailed auto-tune are active."
         )
         self._set_text_stable(self.memory_stats_box, text, "_last_memory_stats_text")
 

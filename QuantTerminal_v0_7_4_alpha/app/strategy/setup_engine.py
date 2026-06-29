@@ -52,6 +52,7 @@ class SetupDecision:
     choch_detected: bool = False
     displacement_detected: bool = False
     trigger_sequence: str = "Waiting"
+    training_speed: str = "Balanced"
 
 
 class FVGSetupEngine:
@@ -71,15 +72,17 @@ class FVGSetupEngine:
         # These are still guarded, but loose enough to let the paper bot learn.
         self.min_candles = 35
         self.max_fvg_age_bars = 55
-        self.min_confidence_to_trade = 54
+        self.min_confidence_to_trade = 50
         self.focus_gap_key: str = ""
         self.focus_side: str = ""
         self.used_gap_keys: set[str] = set()
         self.seconds_left: int | None = None
-        self.min_seconds_left = 35
+        self.min_seconds_left = 25
         self.training_probe_enabled = True
+        self.training_speed = "More Trades"
+        self._last_scout_bucket = -1
 
-    def configure_context(self, used_gap_keys: set[str] | None = None, seconds_left: int | None = None) -> None:
+    def configure_context(self, used_gap_keys: set[str] | None = None, seconds_left: int | None = None, training_speed: str | None = None) -> None:
         """UI/runtime context for safety rules.
 
         The strategy stays pure chart-first, but the app can tell it which GAPs
@@ -88,11 +91,41 @@ class FVGSetupEngine:
         if used_gap_keys is not None:
             self.used_gap_keys = set(used_gap_keys)
         self.seconds_left = seconds_left
+        if training_speed:
+            self.training_speed = str(training_speed)
+        self._apply_training_speed()
+
+
+    def _apply_training_speed(self) -> None:
+        """Tune strictness for data collection without changing the core model."""
+        mode = str(getattr(self, "training_speed", "More Trades"))
+        if mode.startswith("Strict"):
+            self.min_candles = 45
+            self.max_fvg_age_bars = 55
+            self.min_confidence_to_trade = 58
+            self.min_seconds_left = 45
+        elif mode.startswith("Max"):
+            self.min_candles = 25
+            self.max_fvg_age_bars = 90
+            self.min_confidence_to_trade = 38
+            self.min_seconds_left = 15
+        else:
+            self.min_candles = 30
+            self.max_fvg_age_bars = 75
+            self.min_confidence_to_trade = 44
+            self.min_seconds_left = 25
+
+    def _is_max_training(self) -> bool:
+        return str(getattr(self, "training_speed", "")).startswith("Max")
+
+    def _is_more_trades(self) -> bool:
+        return str(getattr(self, "training_speed", "")).startswith(("More", "Max"))
 
     def evaluate(self, candles_1m: list[Candle]) -> SetupDecision:
         d = SetupDecision(ready=False)
         d.state = "SCANNING"
         d.session_label = self._session_label()
+        d.training_speed = str(getattr(self, "training_speed", "More Trades"))
         if self.seconds_left is not None:
             d.time_left_seconds = int(self.seconds_left)
         n = len(candles_1m)
@@ -137,6 +170,10 @@ class FVGSetupEngine:
             d.state = "FOUND_GAP"
             d.checklist.append("❌ FVG: none found")
             d.reasons.append("No fair value gap yet")
+            # Data-builder mode can take rare micro-momentum scout probes so the bot collects outcomes.
+            scout = self._build_scout_probe(d, candles_1m, trend_side, "No 1m FVG yet; micro-momentum scout probe")
+            if scout:
+                return scout
             d.confidence = self._score_from_breakdown(d.confidence_breakdown)
             d.grade = self._grade(d.confidence)
             return d
@@ -196,6 +233,9 @@ class FVGSetupEngine:
                 self.focus_side = ""
             else:
                 d.reasons.append("FVG exists but no fresh aligned setup")
+            scout = self._build_scout_probe(d, candles_1m, trend_side, "Aligned GAP blocked; taking labeled micro scout for training")
+            if scout:
+                return scout
             d.confidence = self._score_from_breakdown(d.confidence_breakdown)
             d.grade = self._grade(d.confidence)
             return d
@@ -292,10 +332,10 @@ class FVGSetupEngine:
             self.training_probe_enabled
             and trend_gate
             and time_ok
-            and retrace_ok
-            and impulse_score >= 4
-            and fvg_quality >= 3
-            and (confirmation or choch_model_ok or self._directional_close(candles_1m, side))
+            and (retrace_ok or self._is_max_training())
+            and impulse_score >= (3 if self._is_more_trades() else 4)
+            and fvg_quality >= (2 if self._is_more_trades() else 3)
+            and (confirmation or choch_model_ok or self._directional_close(candles_1m, side) or self._micro_followthrough(candles_1m, side))
         )
         if probe_setup and not strong_setup:
             d.training_probe = True
@@ -358,6 +398,72 @@ class FVGSetupEngine:
             d.safety_checks.append("❌ Safety: confidence below threshold")
             d.next_action = "Keep watching"
         return d
+
+
+    def _build_scout_probe(self, d: SetupDecision, candles: list[Candle], side: str, reason: str) -> SetupDecision | None:
+        """Optional data-builder trade when the strict FVG model is too quiet.
+
+        This is intentionally labeled SCOUT_PROBE, not an A-grade setup. It only
+        runs in More Trades / Max Training Data so paper memory gets enough samples.
+        """
+        if side not in ("LONG", "SHORT") or not self._is_more_trades():
+            return None
+        if self.seconds_left is not None and self.seconds_left < self.min_seconds_left:
+            return None
+        if len(candles) < max(8, self.min_candles):
+            return None
+        cur = candles[-1]
+        bucket_size = 90 if self._is_max_training() else 180
+        bucket = int(cur.ts // bucket_size)
+        if bucket == getattr(self, "_last_scout_bucket", -1):
+            return None
+        if not (self._directional_close(candles, side) or self._micro_followthrough(candles, side)):
+            return None
+        self._last_scout_bucket = bucket
+        entry = cur.close
+        recent = candles[-8:]
+        buffer = max(entry * 0.00012, 3.0)
+        if side == "LONG":
+            stop = min(c.low for c in recent) - buffer
+            risk = max(entry - stop, buffer)
+            target = entry + risk * self.min_rr
+        else:
+            stop = max(c.high for c in recent) + buffer
+            risk = max(stop - entry, buffer)
+            target = entry - risk * self.min_rr
+        rr = abs(target - entry) / max(abs(entry - stop), 0.0001)
+        d.ready = True
+        d.side = side
+        d.state = "READY"
+        d.grade = "C" if self._is_max_training() else "B"
+        d.confidence = 42 if self._is_max_training() else 50
+        d.training_probe = True
+        d.entry_model = "Data Builder Scout: 5m bias + 1m momentum"
+        d.trigger_quality = "Scout Probe"
+        d.trigger_sequence = "Micro momentum scout"
+        d.latest_fvg = "SCOUT_PROBE (no focused GAP)"
+        d.active_fvg_key = f"SCOUT:{bucket}:{side}"
+        d.focused_gap = d.active_fvg_key
+        d.setup_signature = f"SCOUT|{side}|{d.trend_15m}|{d.trend_5m}|{d.session_label}"
+        d.checklist.append("✅ Data Builder: labeled scout probe enabled")
+        d.checklist.append("✅ Directional close / micro follow-through")
+        d.checklist.append(f"✅ Risk/Reward: {rr:.2f}:1")
+        d.safety_checks.append("✅ Scout probe is paper-training only and labeled in memory")
+        d.reasons.append(reason)
+        d.reasons.append("This exists to collect training data; it is not treated as a perfect CHoCH/FVG entry.")
+        d.confidence_breakdown.append("+18 Directional micro momentum")
+        d.confidence_breakdown.append("+10 Data builder probe")
+        d.plan = TradePlan(side, entry, stop, target, rr, d.entry_model)
+        d.next_action = "Open paper training scout"
+        return d
+
+    def _micro_followthrough(self, candles: list[Candle], side: str) -> bool:
+        if len(candles) < 4:
+            return False
+        a, b, c = candles[-3], candles[-2], candles[-1]
+        if side == "LONG":
+            return b.close > b.open and c.close > c.open and c.close > max(a.close, b.close)
+        return b.close < b.open and c.close < c.open and c.close < min(a.close, b.close)
 
     def _fvg_key(self, fvg: FVG) -> str:
         return f"{fvg.direction}:{int(fvg.end_ts)}:{round(fvg.top, 2)}:{round(fvg.bottom, 2)}"
