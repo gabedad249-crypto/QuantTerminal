@@ -249,7 +249,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.4 Pro UI • compact R/R box • cash-scaled live payout"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.6 Trade lifecycle lock • stable open trade overlay"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart, 1)
         center.addWidget(chart_panel)
@@ -385,14 +385,17 @@ class MainWindow(QMainWindow):
         # use the same price. Full FVG recalculation is still throttled below.
         if hasattr(self.chart, "candles"):
             self.chart.candles = candles[-800:]
-        # Paper trades are forced closed at the Kalshi BTC15 close time; no paper trade is allowed to survive past the 15m market.
-        snap_for_trade = self.kalshi_timer.snapshot()
-        expired = bool(snap_for_trade.close_time and snap_for_trade.seconds_left() <= 0)
+        # Paper trade lifecycle lock:
+        # the trade's own expires_at is the source of truth. Do NOT force-close
+        # from a possibly stale Kalshi snapshot, because that caused open→instant
+        # close flicker while the chart still had a plan overlay.
         before_trade = self.account.open_trade
-        self.account.update(price, force_close=expired, force_reason="KALSHI_15M_END" if expired else "")
+        if before_trade and not before_trade.expires_at:
+            before_trade.expires_at = self._safe_trade_expiry_ts()
+        self.account.update(price)
         open_trade = self.account.open_trade
         if before_trade and not open_trade:
-            self.log_timeline("BTC15/TP/SL exit processed — waiting for new 15m read")
+            self.log_timeline(f"EXIT {before_trade.exit_reason or 'CLOSED'} | Paper trade closed cleanly — waiting for new 15m read")
             # A real paper trade ended. Remove the active trade overlay immediately;
             # the strategy may later draw a separate PENDING plan, but it will not
             # look like an open trade.
@@ -1526,6 +1529,7 @@ class MainWindow(QMainWindow):
             meta["cash_rr"] = cash_rr
             meta["btc15_bucket"] = bucket
             meta["expiry_ts"] = expiry_ts
+            meta["min_hold_seconds"] = 3.0
 
             self.account.open_position(
                 side,
@@ -1544,7 +1548,7 @@ class MainWindow(QMainWindow):
             self.chart.set_plan(side, entry, stop, target, active=True, mode="trade", emit=False)
             exp = self.kalshi_timer.snapshot().label()
             self.log_signal(f"OPENED PAPER {side} @ {entry:,.2f} | stop {stop:,.2f} | target {target:,.2f} | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} | expires BTC15 {exp}")
-            self.log_timeline(f"OPENED PAPER {side} | live entry {entry:,.2f} | one trade for BTC15 bucket {bucket} | expires {exp}")
+            self.log_timeline(f"OPENED PAPER {side} | live entry {entry:,.2f} | lifecycle locked | min hold 3s | one trade for BTC15 bucket {bucket} | expires {exp}")
         except Exception as e:
             self.log(str(e))
 

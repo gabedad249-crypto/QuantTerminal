@@ -30,3 +30,23 @@ git add .
 git commit -m "Fix trade lifecycle overlays and add EMA continuation filter"
 git push
 ```
+
+
+## v0.8.6 Alpha
+
+Trade lifecycle hardening release.
+
+- Fixed open → instant close caused by stale Kalshi snapshot force-close.
+- Paper trades now close from their own locked BTC15 expiry timestamp.
+- Added a 3 second TP/SL management lock to prevent same-second flicker closes.
+- Open trade overlay now stays synced to the account state.
+- Green/red R/R zones are more visible and more compact.
+- FVG focus boxes draw shorter so they do not stretch across the chart.
+
+Recommended commit:
+
+```bash
+git add .
+git commit -m "Fix paper trade lifecycle and stable risk reward overlay"
+git push
+```

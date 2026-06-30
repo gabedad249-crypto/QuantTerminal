@@ -59,7 +59,7 @@ class ChartWidget(QGraphicsView):
         # Clean-chart defaults. The strategy can still use every FVG internally,
         # but the screen only draws the most relevant recent gaps so it doesn't
         # turn into a wall of BULL/BEAR labels.
-        self.max_gap_boxes = 5
+        self.max_gap_boxes = 3
         self.show_filled_gaps = False
         self.show_gap_labels = True
         self.show_swing_labels = False
@@ -335,7 +335,7 @@ class ChartWidget(QGraphicsView):
             if not indexes:
                 continue
             start_i = max(0, indexes[0])
-            end_i = min(count - 1, start_i + 4)
+            end_i = min(count - 1, start_i + 3)
             x1 = self._x(start_i, count) - step * 0.40
             x2 = self._x(end_i, count) + step * 0.40
             y_top = self._y(fvg.top)
@@ -409,14 +409,14 @@ class ChartWidget(QGraphicsView):
 
         y_target = compact_edge(y_target_raw, y_entry)
         y_stop = compact_edge(y_stop_raw, y_entry)
-        green = QColor("#22c55e"); green.setAlpha(30)
-        red = QColor("#ef4444"); red.setAlpha(30)
-        green_border = QColor("#22c55e"); green_border.setAlpha(120)
-        red_border = QColor("#ef4444"); red_border.setAlpha(120)
+        green = QColor("#22c55e"); green.setAlpha(48)
+        red = QColor("#ef4444"); red.setAlpha(42)
+        green_border = QColor("#22c55e"); green_border.setAlpha(170)
+        red_border = QColor("#ef4444"); red_border.setAlpha(170)
 
         # Keep zones near the current/entry area like a pro R/R box. PENDING
         # plans show only lines; OPEN trades show compact green/red filled zones.
-        zone_w = min(max(120.0, self._plot.width() * 0.18), 220.0)
+        zone_w = min(max(105.0, self._plot.width() * 0.14), 170.0)
         x2 = self._plot.right() - 10
         x1 = x2 - zone_w
         open_trade_mode = (mode == "trade")

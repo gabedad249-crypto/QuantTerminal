@@ -152,13 +152,22 @@ class PaperAccount:
         if not trade:
             return
         price = float(price)
+        now = time.time()
         if trade.side == "LONG":
-            hit_stop = price <= trade.stop
-            hit_target = price >= trade.target
+            raw_hit_stop = price <= trade.stop
+            raw_hit_target = price >= trade.target
         else:
-            hit_stop = price >= trade.stop
-            hit_target = price <= trade.target
-        time_expired = bool(trade.expires_at and time.time() >= float(trade.expires_at))
+            raw_hit_stop = price >= trade.stop
+            raw_hit_target = price <= trade.target
+        time_expired = bool(trade.expires_at and now >= float(trade.expires_at))
+
+        # Anti-flicker lifecycle guard: a newly opened paper trade gets a short
+        # management lock so stale tick/rounding noise cannot open and close it
+        # on the same second. BTC15 expiry can still close immediately.
+        min_hold = float(trade.setup_meta.get("min_hold_seconds", 0.0) or 0.0)
+        tp_sl_live = (now - float(trade.opened_at)) >= max(0.0, min_hold)
+        hit_stop = bool(raw_hit_stop and tp_sl_live)
+        hit_target = bool(raw_hit_target and tp_sl_live)
 
         unrealized = self._cash_scaled_pnl(trade, price)
         trade.pnl = unrealized
