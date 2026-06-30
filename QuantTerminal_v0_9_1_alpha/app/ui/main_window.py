@@ -67,6 +67,9 @@ class MainWindow(QMainWindow):
         self._ready_confirm_candle_ts = 0
         self._ready_confirm_count = 0
         self._traded_15m_buckets: set[int] = set()
+        self._last_trade_open_ts = 0.0
+        self._last_entry_block_reason = ""
+        self._last_auto_entry_key = ""
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
@@ -115,7 +118,7 @@ class MainWindow(QMainWindow):
         self.auto_paper_toggle = QCheckBox("Auto-open paper when ready")
         self.auto_paper_toggle.setChecked(bool(saved_ui.get("auto_paper", True)))
         self.mode_box = QComboBox(); self.mode_box.addItems(["Paper Training (auto paper)", "Recommend Only (alerts)"]); self.mode_box.setCurrentText(str(saved_ui.get("mode", "Paper Training (auto paper)")))
-        self.training_speed_box = QComboBox(); self.training_speed_box.addItems(["More Trades", "Strict Quality", "Max Training Data"]); self.training_speed_box.setCurrentText(str(saved_ui.get("training_speed", "More Trades")))
+        self.training_speed_box = QComboBox(); self.training_speed_box.addItems(["More Trades", "Scalp Heavy", "Strict Quality", "Max Training Data"]); self.training_speed_box.setCurrentText(str(saved_ui.get("training_speed", "More Trades")))
         self.kalshi_url_box = QLineEdit(settings.get("kalshi_market_url", "https://kalshi.com/category/crypto/btc?frequency=fifteen_min"))
         self.kalshi_url_box.setPlaceholderText("Paste Kalshi BTC15 market URL")
 
@@ -249,7 +252,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.6.2 hard trade lock • no pop-close"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.9.0 scalp mode • multi-trade BTC15 paper training"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart, 1)
         center.addWidget(chart_panel)
@@ -541,6 +544,28 @@ class MainWindow(QMainWindow):
             plan_sig,
             ";".join(getattr(d, "reasons", [])[-3:]),
         ])
+
+    def _auto_entry_key(self, d, gap_key: str = "") -> str:
+        """Stable key for auto-entry waits.
+
+        Do NOT include live entry/stop/target price here. Those change every tick,
+        which was resetting the read-confirmation counter and creating lots of
+        AUTO PLAN READY logs with zero paper entries.
+        """
+        if not d:
+            return "none"
+        key = gap_key or str(getattr(d, "active_fvg_key", "")) or str(getattr(d, "setup_signature", ""))
+        side = str(getattr(d, "side", "WAIT"))
+        grade = str(getattr(d, "grade", ""))
+        model = str(getattr(d, "entry_model", ""))[:24]
+        bucket = self._current_btc15_bucket() if hasattr(self, "_current_btc15_bucket") else 0
+        return f"{bucket}|{key}|{side}|{grade}|{model}"
+
+    def _entry_block(self, reason: str) -> None:
+        """Log auto-entry blockers without spamming the timeline every tick."""
+        if reason != getattr(self, "_last_entry_block_reason", ""):
+            self._last_entry_block_reason = reason
+            self.log_timeline(reason)
 
     def _set_text_stable(self, box: QTextEdit, text: str, attr_name: str | None = None) -> None:
         # QTextEdit.setPlainText resets scroll/caret. Only write if content actually
@@ -1271,22 +1296,31 @@ class MainWindow(QMainWindow):
                 f"Buy-in {entry:,.2f} Stop {stop:,.2f} Target {target:,.2f}"
             )
         training_mode = hasattr(self, "mode_box") and self.mode_box.currentText().startswith("Paper Training")
-        if training_mode and self.auto_paper_toggle.isChecked() and not self.account.open_trade and log_sig != self._auto_opened_signal_sig:
+        entry_key = self._auto_entry_key(d, gap_key)
+        if training_mode and self.auto_paper_toggle.isChecked() and not self.account.open_trade and entry_key != self._auto_opened_signal_sig:
             bucket = self._current_btc15_bucket()
-            if bucket in self._traded_15m_buckets:
-                self.log_timeline("WAIT | one paper trade already used for this BTC15 window")
+            max_trades = self._max_trades_per_window()
+            current_count = self._window_trade_count(bucket)
+            if current_count >= max_trades:
+                self._entry_block(f"WAIT | BTC15 trade cap reached {current_count}/{max_trades}; fresh read next window")
                 return
-            if self._safe_seconds_left() < max(25, int(getattr(self.setup_engine, "min_seconds_left", 25))):
-                self.log_timeline("WAIT | BTC15 too close to close; fresh read next window")
+            cooldown_left = self._trade_cooldown_seconds() - int(time.time() - float(getattr(self, "_last_trade_open_ts", 0.0) or 0.0))
+            if current_count > 0 and cooldown_left > 0:
+                self._entry_block(f"WAIT | scalp cooldown {cooldown_left}s before next paper entry")
                 return
-            ok_to_open, wait_reason = self._ready_has_waited_enough(log_sig)
+            if self._safe_seconds_left() < max(10, int(getattr(self.setup_engine, "min_seconds_left", 18))):
+                self._entry_block("WAIT | BTC15 too close to close; fresh read next window")
+                return
+            ok_to_open, wait_reason = self._ready_has_waited_enough(entry_key)
             if not ok_to_open:
                 if wait_reason != self._last_timeline_state:
                     self._last_timeline_state = wait_reason
                     self.log_timeline(f"READ | {wait_reason}")
                 return
-            self._auto_opened_signal_sig = log_sig
-            self.open_planned_trade()
+            opened = self.open_planned_trade()
+            if opened:
+                self._auto_opened_signal_sig = entry_key
+                self._last_entry_block_reason = ""
 
     def on_chart_plan_changed(self, plan: dict) -> None:
         self._syncing_plan = True
@@ -1406,6 +1440,8 @@ class MainWindow(QMainWindow):
             "choch_detected": bool(getattr(d, "choch_detected", False)),
             "displacement_detected": bool(getattr(d, "displacement_detected", False)),
             "training_probe": bool(getattr(d, "training_probe", False)),
+            "training_speed": self._training_speed(),
+            "scalp_heavy": self._training_speed().startswith("Scalp"),
             "candlestick_patterns": list(getattr(d, "candlestick_patterns", [])),
             "candlestick_bias": str(getattr(d, "candlestick_bias", "")),
             "candlestick_signal": str(getattr(d, "candlestick_signal", "")),
@@ -1432,6 +1468,47 @@ class MainWindow(QMainWindow):
 
     def _safe_seconds_left(self) -> int:
         return max(0, int(self._safe_trade_expiry_ts() - time.time()))
+
+    def _window_trade_count(self, bucket: int | None = None) -> int:
+        bucket = self._current_btc15_bucket() if bucket is None else int(bucket)
+        count = 0
+        for tr in getattr(self.account, "trades", []):
+            try:
+                if int(tr.setup_meta.get("btc15_bucket", -1)) == bucket:
+                    count += 1
+            except Exception:
+                pass
+        return count
+
+    def _max_trades_per_window(self) -> int:
+        speed = self._training_speed() if hasattr(self, "_training_speed") else "More Trades"
+        if speed.startswith("Strict"):
+            return 1
+        if speed.startswith("Scalp"):
+            return 8
+        if speed.startswith("Max"):
+            return 5
+        return 3
+
+    def _trade_cooldown_seconds(self) -> int:
+        speed = self._training_speed() if hasattr(self, "_training_speed") else "More Trades"
+        if speed.startswith("Strict"):
+            return 90
+        if speed.startswith("Scalp"):
+            return 12
+        if speed.startswith("Max"):
+            return 20
+        return 45
+
+    def _min_hold_seconds_for_mode(self) -> float:
+        speed = self._training_speed() if hasattr(self, "_training_speed") else "More Trades"
+        if speed.startswith("Strict"):
+            return 35.0
+        if speed.startswith("Scalp"):
+            return 8.0
+        if speed.startswith("Max"):
+            return 10.0
+        return 18.0
 
     def _rebuild_trade_lines_from_live_price(self, side: str, price: float) -> tuple[float, float, float, float]:
         """Build a fresh chart entry/stop/target from current BTC price.
@@ -1467,18 +1544,20 @@ class MainWindow(QMainWindow):
 
     def _ready_confirmation_required(self) -> int:
         speed = self._training_speed() if hasattr(self, "_training_speed") else "More Trades"
-        # Fresh BTC15 read rule: even aggressive modes should see at least one
-        # closed 1m candle inside the active window before opening paper.
+        # Stable setup key now prevents the counter from resetting on every live
+        # price tick. More Trades only needs one closed candle; Strict waits more.
         if speed.startswith("Strict"):
-            return 3
+            return 2
+        if speed.startswith("Scalp"):
+            return 0
         if speed.startswith("Max"):
-            return 1
-        return 2
+            return 0
+        return 1
 
     def _ready_has_waited_enough(self, sig: str) -> tuple[bool, str]:
         required = self._ready_confirmation_required()
         if required <= 0:
-            return True, "Max Training Data: no extra wait"
+            return True, "Aggressive mode: no extra wait after READY"
         bucket = self._current_candle_bucket_ts()
         if sig != self._ready_confirm_sig:
             self._ready_confirm_sig = sig
@@ -1491,26 +1570,32 @@ class MainWindow(QMainWindow):
         ready = self._ready_confirm_count >= required
         return ready, f"Read confirmation candles {self._ready_confirm_count}/{required}"
 
-    def open_planned_trade(self) -> None:
+    def open_planned_trade(self) -> bool:
         plan = self.chart.trade_plan
         if not plan.get("active") or not all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
             self.log("No auto plan yet. Waiting for confirmed setup first.")
-            return
+            return False
         if not self.last_decision or not self.last_decision.ready:
             self.log("Blocked: paper trade requires a valid READY decision first.")
-            return
+            return False
         if self.account.open_trade:
             self.log("Blocked: one paper trade already open.")
-            return
+            return False
 
         bucket = self._current_btc15_bucket()
-        if bucket in self._traded_15m_buckets:
-            self.log("Blocked: this BTC15 window already had a paper trade. Waiting for next 15m read.")
-            return
+        max_trades = self._max_trades_per_window()
+        current_count = self._window_trade_count(bucket)
+        if current_count >= max_trades:
+            self.log(f"Blocked: BTC15 paper trade cap reached {current_count}/{max_trades}. Waiting for next 15m read.")
+            return False
+        cooldown_left = self._trade_cooldown_seconds() - int(time.time() - float(getattr(self, "_last_trade_open_ts", 0.0) or 0.0))
+        if current_count > 0 and cooldown_left > 0:
+            self.log(f"Blocked: scalp cooldown {cooldown_left}s left before next paper entry.")
+            return False
         seconds_left = self._safe_seconds_left()
-        if seconds_left < max(25, int(getattr(self.setup_engine, "min_seconds_left", 25))):
+        if seconds_left < max(12, int(getattr(self.setup_engine, "min_seconds_left", 25))):
             self.log(f"Blocked: BTC15 only has {seconds_left}s left. Waiting for next market.")
-            return
+            return False
 
         try:
             side = str(plan.get("side", "LONG")).upper()
@@ -1521,10 +1606,10 @@ class MainWindow(QMainWindow):
             # beyond either exit line. This was the main cause of instant open/close.
             if side == "LONG" and not (stop < live_entry < target):
                 self.log("Blocked stale LONG plan: live price is not between stop and target.")
-                return
+                return False
             if side == "SHORT" and not (target < live_entry < stop):
                 self.log("Blocked stale SHORT plan: live price is not between target and stop.")
-                return
+                return False
 
             expiry_ts = self._safe_trade_expiry_ts()
             meta = self._setup_meta_for_trade()
@@ -1534,7 +1619,10 @@ class MainWindow(QMainWindow):
             meta["cash_rr"] = cash_rr
             meta["btc15_bucket"] = bucket
             meta["expiry_ts"] = expiry_ts
-            meta["min_hold_seconds"] = 20.0
+            meta["min_hold_seconds"] = self._min_hold_seconds_for_mode()
+            meta["training_speed"] = self._training_speed()
+            meta["window_trade_number"] = current_count + 1
+            meta["max_window_trades"] = max_trades
 
             self.account.open_position(
                 side,
@@ -1547,15 +1635,18 @@ class MainWindow(QMainWindow):
                 setup_meta=meta
             )
             self._traded_15m_buckets.add(bucket)
+            self._last_trade_open_ts = time.time()
             if self._planned_gap_key:
                 self._used_gap_keys.add(self._planned_gap_key)
             self.chart.set_cash_metrics(self._cash_size(), self._cash_stop_loss(), self._cash_payout())
             self.chart.set_plan(side, entry, stop, target, active=True, mode="trade", emit=False)
             exp = time.strftime("%H:%M:%S", time.localtime(expiry_ts))
             self.log_signal(f"OPENED PAPER {side} @ {entry:,.2f} | stop {stop:,.2f} | target {target:,.2f} | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} | locked expiry {exp}")
-            self.log_timeline(f"OPENED PAPER {side} | live entry {entry:,.2f} | lifecycle locked | min hold 20s | one trade for BTC15 bucket {bucket} | locked expiry {exp}")
+            self.log_timeline(f"OPENED PAPER {side} | live entry {entry:,.2f} | scalp {current_count+1}/{max_trades} this BTC15 | min hold {self._min_hold_seconds_for_mode():.0f}s | locked expiry {exp}")
+            return True
         except Exception as e:
             self.log(str(e))
+            return False
 
     def on_learning_toggle(self) -> None:
         self.learning.enabled = self.learning_toggle.isChecked()

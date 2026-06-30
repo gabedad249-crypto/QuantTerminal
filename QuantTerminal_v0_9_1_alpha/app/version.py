@@ -1,2 +1,2 @@
 APP_NAME = "Quant Terminal"
-VERSION = "0.8.6.2"
+VERSION = "0.9.1"

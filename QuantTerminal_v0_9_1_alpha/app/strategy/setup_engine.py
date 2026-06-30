@@ -110,6 +110,12 @@ class FVGSetupEngine:
             self.max_fvg_age_bars = 55
             self.min_confidence_to_trade = 58
             self.min_seconds_left = 45
+        elif mode.startswith("Scalp"):
+            # Heavy BTC15 paper scalping: more frequent lower-grade probes, still labeled clearly.
+            self.min_candles = 20
+            self.max_fvg_age_bars = 120
+            self.min_confidence_to_trade = 32
+            self.min_seconds_left = 12
         elif mode.startswith("Max"):
             self.min_candles = 25
             self.max_fvg_age_bars = 90
@@ -124,8 +130,11 @@ class FVGSetupEngine:
     def _is_max_training(self) -> bool:
         return str(getattr(self, "training_speed", "")).startswith("Max")
 
+    def _is_scalp_heavy(self) -> bool:
+        return str(getattr(self, "training_speed", "")).startswith("Scalp")
+
     def _is_more_trades(self) -> bool:
-        return str(getattr(self, "training_speed", "")).startswith(("More", "Max"))
+        return str(getattr(self, "training_speed", "")).startswith(("More", "Max", "Scalp"))
 
     def evaluate(self, candles_1m: list[Candle]) -> SetupDecision:
         d = SetupDecision(ready=False)
@@ -442,7 +451,7 @@ class FVGSetupEngine:
         if len(candles) < max(8, self.min_candles):
             return None
         cur = candles[-1]
-        bucket_size = 90 if self._is_max_training() else 180
+        bucket_size = 45 if self._is_scalp_heavy() else (90 if self._is_max_training() else 180)
         bucket = int(cur.ts // bucket_size)
         if bucket == getattr(self, "_last_scout_bucket", -1):
             return None
@@ -464,10 +473,10 @@ class FVGSetupEngine:
         d.ready = True
         d.side = side
         d.state = "READY"
-        d.grade = "C" if self._is_max_training() else "B"
-        d.confidence = 42 if self._is_max_training() else 50
+        d.grade = "C" if (self._is_max_training() or self._is_scalp_heavy()) else "B"
+        d.confidence = 40 if self._is_scalp_heavy() else (42 if self._is_max_training() else 50)
         d.training_probe = True
-        d.entry_model = "Data Builder Scout: 5m bias + 1m momentum"
+        d.entry_model = "Scalp/Data Scout: 5m bias + 1m momentum" if self._is_scalp_heavy() else "Data Builder Scout: 5m bias + 1m momentum"
         d.trigger_quality = "Scout Probe"
         d.trigger_sequence = "Micro momentum scout"
         d.latest_fvg = "SCOUT_PROBE (no focused GAP)"
@@ -477,7 +486,7 @@ class FVGSetupEngine:
         d.checklist.append("✅ Data Builder: labeled scout probe enabled")
         d.checklist.append("✅ Directional close / micro follow-through")
         d.checklist.append(f"✅ Risk/Reward: {rr:.2f}:1")
-        d.safety_checks.append("✅ Scout probe is paper-training only and labeled in memory")
+        d.safety_checks.append("✅ Scout/scalp probe is paper-training only and labeled in memory")
         d.reasons.append(reason)
         d.reasons.append("This exists to collect training data; it is not treated as a perfect CHoCH/FVG entry.")
         d.confidence_breakdown.append("+18 Directional micro momentum")
