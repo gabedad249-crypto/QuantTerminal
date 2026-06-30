@@ -66,6 +66,7 @@ class MainWindow(QMainWindow):
         self._ready_confirm_sig = ""
         self._ready_confirm_candle_ts = 0
         self._ready_confirm_count = 0
+        self._traded_15m_buckets: set[int] = set()
 
         self.bus = PriceBus()
         self.bus.price.connect(self.queue_price)
@@ -392,12 +393,22 @@ class MainWindow(QMainWindow):
         open_trade = self.account.open_trade
         if before_trade and not open_trade:
             self.log_timeline("BTC15/TP/SL exit processed — waiting for new 15m read")
+            # A real paper trade ended. Remove the active trade overlay immediately;
+            # the strategy may later draw a separate PENDING plan, but it will not
+            # look like an open trade.
+            if str(self.chart.trade_plan.get("mode") or "") == "trade":
+                self.chart.clear_plan(emit=False)
         if open_trade:
             risk_cash = float(open_trade.setup_meta.get("cash_stop_loss", self._cash_stop_loss())) if hasattr(open_trade, "setup_meta") else self._cash_stop_loss()
             payout_cash = float(open_trade.setup_meta.get("cash_payout", self._cash_payout())) if hasattr(open_trade, "setup_meta") else self._cash_payout()
             self.chart.set_cash_metrics(open_trade.size_usd, risk_cash, payout_cash)
+            # Keep the chart in OPEN TRADE mode every tick so live payout/SHORT P&L
+            # and the green/red zones cannot desync from the account state.
+            self.chart.set_plan(open_trade.side, open_trade.entry, open_trade.stop, open_trade.target, active=True, mode="trade", emit=False)
         else:
             self.chart.set_cash_metrics(self._cash_size(), self._cash_stop_loss(), self._cash_payout())
+            if str(self.chart.trade_plan.get("mode") or "") == "trade":
+                self.chart.clear_plan(emit=False)
         self.chart.set_live_price(price, open_trade.pnl if open_trade else 0.0, open_trade.side if open_trade else "")
         self.capture_closed_trades_for_learning()
 
@@ -440,7 +451,7 @@ class MainWindow(QMainWindow):
         # Watch the current 15-minute BTC move as UP/DOWN %. This is not a
         # Kalshi contract price; it is the underlying BTC move within the active
         # 15m candle/window so you can compare direction quickly.
-        bucket = int(time.time()) - (int(time.time()) % 900)
+        bucket = self._current_btc15_bucket()
         if self._last_15m_bucket != bucket or self._last_15m_open is None:
             self._last_15m_bucket = bucket
             # New Kalshi BTC15 window = fresh read. Clear per-window GAP locks so
@@ -448,6 +459,11 @@ class MainWindow(QMainWindow):
             self._used_gap_keys.clear()
             self._ready_confirm_sig = ""
             self._ready_confirm_count = 0
+            self._ready_confirm_sig = ""
+            self._auto_opened_signal_sig = ""
+            self._planned_gap_key = ""
+            self._last_auto_plan_sig = ""
+            self._last_auto_log_sig = ""
             # Prefer the first 1m candle inside this 15m window.
             inside = [c for c in self.candles.candles if int(c.ts) >= bucket]
             self._last_15m_open = float(inside[0].open) if inside else float(price)
@@ -1244,6 +1260,13 @@ class MainWindow(QMainWindow):
             )
         training_mode = hasattr(self, "mode_box") and self.mode_box.currentText().startswith("Paper Training")
         if training_mode and self.auto_paper_toggle.isChecked() and not self.account.open_trade and log_sig != self._auto_opened_signal_sig:
+            bucket = self._current_btc15_bucket()
+            if bucket in self._traded_15m_buckets:
+                self.log_timeline("WAIT | one paper trade already used for this BTC15 window")
+                return
+            if self._safe_seconds_left() < max(25, int(getattr(self.setup_engine, "min_seconds_left", 25))):
+                self.log_timeline("WAIT | BTC15 too close to close; fresh read next window")
+                return
             ok_to_open, wait_reason = self._ready_has_waited_enough(log_sig)
             if not ok_to_open:
                 if wait_reason != self._last_timeline_state:
@@ -1377,6 +1400,55 @@ class MainWindow(QMainWindow):
         }
 
 
+
+    def _current_btc15_bucket(self) -> int:
+        return int(time.time()) - (int(time.time()) % 900)
+
+    def _safe_trade_expiry_ts(self) -> float:
+        """Return a safe BTC15 expiry timestamp for paper trades.
+
+        If the Kalshi snapshot is temporarily stale/old, fall back to the local
+        current 15-minute boundary. This prevents the paper account from opening
+        and instantly closing because an expired close_time was cached.
+        """
+        now = time.time()
+        try:
+            snap = self.kalshi_timer.snapshot()
+            if snap.close_time:
+                exp = float(snap.close_time.timestamp())
+                if exp > now + 8:
+                    return exp
+        except Exception:
+            pass
+        return float(self._current_btc15_bucket() + 900)
+
+    def _safe_seconds_left(self) -> int:
+        return max(0, int(self._safe_trade_expiry_ts() - time.time()))
+
+    def _rebuild_trade_lines_from_live_price(self, side: str, price: float) -> tuple[float, float, float, float]:
+        """Build a fresh chart entry/stop/target from current BTC price.
+
+        The strategy decides direction/permission. The actual paper entry uses
+        the latest Coinbase BTC-USD tick so the bot does not open a stale plan
+        that is already past stop or target.
+        """
+        entry = float(price)
+        cash_rr = self._cash_payout() / max(self._cash_stop_loss(), 0.01)
+        planned_stop = None
+        try:
+            planned_stop = float(self.chart.trade_plan.get("stop"))
+        except Exception:
+            planned_stop = None
+        risk = self._recent_price_risk_distance(entry, planned_stop)
+        reward = max(risk * cash_rr, entry * 0.00025)
+        if side == "LONG":
+            stop = max(0.01, entry - risk)
+            target = entry + reward
+        else:
+            stop = entry + risk
+            target = max(0.01, entry - reward)
+        return entry, stop, target, cash_rr
+
     def _current_candle_bucket_ts(self) -> int:
         try:
             if self.candles.candles:
@@ -1414,29 +1486,65 @@ class MainWindow(QMainWindow):
     def open_planned_trade(self) -> None:
         plan = self.chart.trade_plan
         if not plan.get("active") or not all(isinstance(plan.get(k), (int, float)) for k in ("entry", "stop", "target")):
-            self.log("No auto plan yet. Waiting for confirmed FVG setup first.")
+            self.log("No auto plan yet. Waiting for confirmed setup first.")
             return
         if not self.last_decision or not self.last_decision.ready:
-            self.log("Blocked: paper trade requires valid FVG confirmation decision first.")
+            self.log("Blocked: paper trade requires a valid READY decision first.")
             return
+        if self.account.open_trade:
+            self.log("Blocked: one paper trade already open.")
+            return
+
+        bucket = self._current_btc15_bucket()
+        if bucket in self._traded_15m_buckets:
+            self.log("Blocked: this BTC15 window already had a paper trade. Waiting for next 15m read.")
+            return
+        seconds_left = self._safe_seconds_left()
+        if seconds_left < max(25, int(getattr(self.setup_engine, "min_seconds_left", 25))):
+            self.log(f"Blocked: BTC15 only has {seconds_left}s left. Waiting for next market.")
+            return
+
         try:
+            side = str(plan.get("side", "LONG")).upper()
+            live_entry = float(self.latest_price or plan["entry"])
+            entry, stop, target, cash_rr = self._rebuild_trade_lines_from_live_price(side, live_entry)
+
+            # Final stale-plan guard: do not open if the live price is already
+            # beyond either exit line. This was the main cause of instant open/close.
+            if side == "LONG" and not (stop < live_entry < target):
+                self.log("Blocked stale LONG plan: live price is not between stop and target.")
+                return
+            if side == "SHORT" and not (target < live_entry < stop):
+                self.log("Blocked stale SHORT plan: live price is not between target and stop.")
+                return
+
+            expiry_ts = self._safe_trade_expiry_ts()
+            meta = self._setup_meta_for_trade()
+            meta["cash_buy_in"] = self._cash_size()
+            meta["cash_stop_loss"] = self._cash_stop_loss()
+            meta["cash_payout"] = self._cash_payout()
+            meta["cash_rr"] = cash_rr
+            meta["btc15_bucket"] = bucket
+            meta["expiry_ts"] = expiry_ts
+
             self.account.open_position(
-                str(plan.get("side", "LONG")),
-                float(plan["entry"]),
-                float(plan["stop"]),
-                float(plan["target"]),
+                side,
+                entry,
+                stop,
+                target,
                 self._cash_size(),
-                f"{getattr(self.last_decision, 'entry_model', 'FVG setup')} | {self.last_decision.trend_15m}/{self.last_decision.trend_5m} | {self.last_decision.latest_fvg} | {getattr(self.last_decision, 'trigger_quality', 'trigger')} | confidence {self.last_decision.confidence}% | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} RR {self._configured_cash_metrics()['rr']:.2f}:1",
-                expires_at=self.kalshi_timer.snapshot().close_time.timestamp() if self.kalshi_timer.snapshot().close_time else None,
-                setup_meta=self._setup_meta_for_trade()
+                f"{getattr(self.last_decision, 'entry_model', 'Setup')} | {getattr(self.last_decision, 'trend_15m', '')}/{getattr(self.last_decision, 'trend_5m', '')} | {getattr(self.last_decision, 'latest_fvg', '')} | {getattr(self.last_decision, 'trigger_quality', 'trigger')} | confidence {getattr(self.last_decision, 'confidence', 0)}% | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} RR {cash_rr:.2f}:1",
+                expires_at=expiry_ts,
+                setup_meta=meta
             )
+            self._traded_15m_buckets.add(bucket)
             if self._planned_gap_key:
                 self._used_gap_keys.add(self._planned_gap_key)
             self.chart.set_cash_metrics(self._cash_size(), self._cash_stop_loss(), self._cash_payout())
-            self.chart.set_plan(str(plan.get("side", "LONG")), float(plan["entry"]), float(plan["stop"]), float(plan["target"]), active=True, mode="trade", emit=False)
+            self.chart.set_plan(side, entry, stop, target, active=True, mode="trade", emit=False)
             exp = self.kalshi_timer.snapshot().label()
-            self.log_signal(f"OPENED PAPER {plan.get('side')} @ {float(plan['entry']):,.2f} | stop {float(plan['stop']):,.2f} | target {float(plan['target']):,.2f} | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} | expires BTC15 {exp}")
-            self.log_timeline(f"OPENED PAPER {plan.get('side')} | entry {float(plan['entry']):,.2f} | expires BTC15 {exp}")
+            self.log_signal(f"OPENED PAPER {side} @ {entry:,.2f} | stop {stop:,.2f} | target {target:,.2f} | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} | expires BTC15 {exp}")
+            self.log_timeline(f"OPENED PAPER {side} | live entry {entry:,.2f} | one trade for BTC15 bucket {bucket} | expires {exp}")
         except Exception as e:
             self.log(str(e))
 

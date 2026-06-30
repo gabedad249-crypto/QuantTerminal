@@ -57,6 +57,8 @@ class SetupDecision:
     candlestick_patterns: list[str] = field(default_factory=list)
     candlestick_bias: str = "NEUTRAL"
     candlestick_signal: str = "No pattern"
+    ema_bias: str = "WAIT"
+    ema_state: str = "Unknown"
 
 
 class FVGSetupEngine:
@@ -153,15 +155,22 @@ class FVGSetupEngine:
             trend_side = htf_side
         if trend_side not in ("LONG", "SHORT"):
             trend_side = self._micro_momentum_side(candles_1m)
+        ema_side, ema_state = self._ema_continuation_bias(candles_1m)
+        d.ema_bias = ema_side
+        d.ema_state = ema_state
+        if trend_side not in ("LONG", "SHORT") and ema_side in ("LONG", "SHORT"):
+            trend_side = ema_side
         trend_ok = trend_side in ("LONG", "SHORT")
         d.entry_model = "5m bias -> Sweep/CHoCH -> 1m FVG execution"
-        d.checklist.append(("✅" if trend_ok else "❌") + f" Bias: 15m {d.trend_15m}, 5m {d.trend_5m}, 5m GAP bias {htf_side}")
+        d.checklist.append(("✅" if trend_ok else "❌") + f" Bias: 15m {d.trend_15m}, 5m {d.trend_5m}, 5m GAP bias {htf_side}, EMA {ema_state}")
         if trend_ok:
             d.side = trend_side
             if htf_side in ("LONG", "SHORT"):
                 d.confidence_breakdown.append(f"+20 5m bias -> 1m execution bias: {htf_side}")
             else:
                 d.confidence_breakdown.append(f"+14 Trend/momentum bias: {trend_side}")
+            if ema_side == trend_side:
+                d.confidence_breakdown.append("+6 EMA continuation alignment")
         else:
             d.state = "SCANNING"
             d.reasons.append("No clean 5m/1m directional bias yet")
@@ -202,6 +211,13 @@ class FVGSetupEngine:
         for fvg in fvgs[-24:]:
             side = "LONG" if fvg.direction == "BULLISH" else "SHORT"
             key = self._fvg_key(fvg)
+            # Video-inspired reinforcement: avoid weak counter-trend reversal
+            # attempts against the 8/20 EMA continuation unless Max Training is
+            # intentionally collecting data or a full CHoCH model later appears.
+            if ema_side in ("LONG", "SHORT") and side != ema_side and not self._is_max_training():
+                if key == self.focus_gap_key:
+                    invalidated_focus = "EMA continuation bias flipped against focused GAP"
+                continue
             # Direction lock / one-GAP focus: while a focus GAP is valid, ignore every other GAP.
             if self.focus_gap_key and key != self.focus_gap_key:
                 continue
@@ -469,6 +485,37 @@ class FVGSetupEngine:
         d.plan = TradePlan(side, entry, stop, target, rr, d.entry_model)
         d.next_action = "Open paper training scout"
         return d
+
+
+    def _ema(self, values: list[float], period: int) -> float:
+        if not values:
+            return 0.0
+        k = 2.0 / (period + 1.0)
+        ema = float(values[0])
+        for v in values[1:]:
+            ema = float(v) * k + ema * (1.0 - k)
+        return ema
+
+    def _ema_continuation_bias(self, candles: list[Candle]) -> tuple[str, str]:
+        """8/20 EMA continuation filter.
+
+        This mirrors the video lesson: stop blindly catching reversals; prefer
+        continuation entries where pullbacks respect the moving-average flow.
+        It is a filter, not a standalone trade signal.
+        """
+        if len(candles) < 24:
+            return "WAIT", "building"
+        closes = [float(c.close) for c in candles[-35:]]
+        ema8 = self._ema(closes[-18:], 8)
+        ema20 = self._ema(closes, 20)
+        prev8 = self._ema(closes[-23:-1], 8) if len(closes) >= 23 else ema8
+        last = closes[-1]
+        slope_up = ema8 >= prev8
+        if last >= ema8 >= ema20 and slope_up:
+            return "LONG", "8EMA over 20EMA continuation up"
+        if last <= ema8 <= ema20 and not slope_up:
+            return "SHORT", "8EMA under 20EMA continuation down"
+        return "WAIT", "mixed / no continuation edge"
 
     def _micro_followthrough(self, candles: list[Candle], side: str) -> bool:
         if len(candles) < 4:

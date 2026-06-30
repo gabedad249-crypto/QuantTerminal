@@ -335,7 +335,7 @@ class ChartWidget(QGraphicsView):
             if not indexes:
                 continue
             start_i = max(0, indexes[0])
-            end_i = min(count - 1, start_i + 6)
+            end_i = min(count - 1, start_i + 4)
             x1 = self._x(start_i, count) - step * 0.40
             x2 = self._x(end_i, count) + step * 0.40
             y_top = self._y(fvg.top)
@@ -414,16 +414,20 @@ class ChartWidget(QGraphicsView):
         green_border = QColor("#22c55e"); green_border.setAlpha(120)
         red_border = QColor("#ef4444"); red_border.setAlpha(120)
 
-        # Keep zones near the current/entry area on the right side like a pro R/R box.
-        zone_w = min(max(170.0, self._plot.width() * 0.26), 320.0)
-        x2 = self._plot.right() - 8
+        # Keep zones near the current/entry area like a pro R/R box. PENDING
+        # plans show only lines; OPEN trades show compact green/red filled zones.
+        zone_w = min(max(120.0, self._plot.width() * 0.18), 220.0)
+        x2 = self._plot.right() - 10
         x1 = x2 - zone_w
-        self.scene.addRect(QRectF(x1, min(y_entry, y_target), zone_w, max(2, abs(y_target - y_entry))), QPen(green_border, 1), QBrush(green))
-        self.scene.addRect(QRectF(x1, min(y_entry, y_stop), zone_w, max(2, abs(y_stop - y_entry))), QPen(red_border, 1), QBrush(red))
+        open_trade_mode = (mode == "trade")
+        if open_trade_mode:
+            self.scene.addRect(QRectF(x1, min(y_entry, y_target), zone_w, max(2, abs(y_target - y_entry))), QPen(green_border, 1), QBrush(green))
+            self.scene.addRect(QRectF(x1, min(y_entry, y_stop), zone_w, max(2, abs(y_stop - y_entry))), QPen(red_border, 1), QBrush(red))
 
         def line(key: str, raw_y: float, y: float, price: float, color: str, label: str, cash: str = "") -> None:
             visible = self._plot.top() <= raw_y <= self._plot.bottom()
-            pen = QPen(QColor(color), 2.6 if key == self.drag_line else 1.8, Qt.SolidLine)
+            style = Qt.SolidLine if open_trade_mode else Qt.DashLine
+            pen = QPen(QColor(color), 2.6 if key == self.drag_line else 1.8, style)
             # Stop/target/entry line spans across chart so you can see if price passes it.
             self.scene.addLine(self._plot.left(), y, self._plot.right(), y, pen)
             arrow = "" if visible else (" real↑" if raw_y < self._plot.top() else " real↓")
@@ -443,8 +447,9 @@ class ChartWidget(QGraphicsView):
         line("stop", y_stop_raw, y_stop, stop, "#ef4444", "STOP", risk_cash)
 
         rr = float(self.trade_plan.get("rr") or 0)
-        title = "OPEN PAPER TRADE" if mode == "trade" else "AUTO PLAN"
-        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • Ratio {rr:.2f}:1 • compact R/R box", "#d1d5db", 10)
+        title = "OPEN PAPER TRADE" if mode == "trade" else "PENDING PLAN — NOT OPEN"
+        subtitle = "compact R/R box" if mode == "trade" else "dashed lines only until paper opens"
+        self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • Ratio {rr:.2f}:1 • {subtitle}", "#d1d5db", 10)
 
 
     def _draw_live_price(self) -> None:
