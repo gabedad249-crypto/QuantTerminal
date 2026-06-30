@@ -1,9 +1,0 @@
-{
-  "buy_in_usd": 20.0,
-  "stop_loss_usd": 15.0,
-  "target_payout_usd": 45.0,
-  "min_setup_rr": 2.0,
-  "mode": "Paper Training (auto paper)",
-  "training_speed": "More Trades",
-  "auto_paper": true
-}

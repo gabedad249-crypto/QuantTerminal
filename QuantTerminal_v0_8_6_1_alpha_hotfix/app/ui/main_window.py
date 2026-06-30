@@ -249,7 +249,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.6 Trade lifecycle lock • stable open trade overlay"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.6.1 locked trade hotfix • no stale Kalshi auto-close"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart, 1)
         center.addWidget(chart_panel)
@@ -510,10 +510,18 @@ class MainWindow(QMainWindow):
         self.timer_label.setText(f"BTC15 {src}: {s//60:02d}:{s%60:02d}{ticker}")
         self.update_kalshi_debug(snap)
         self.update_data_health_panel(snap)
-        # Also close an open paper trade exactly when the BTC15 market ends, even if price is flat.
-        if self.latest_price is not None and self.account.open_trade and snap.close_time and snap.seconds_left() <= 0:
-            self.account.update(float(self.latest_price), force_close=True, force_reason="KALSHI_15M_END")
+        # Do NOT close an open paper trade from the live Kalshi snapshot here.
+        # In prior builds a stale/expired Kalshi snapshot could say 00:00 right
+        # after a trade opened, causing the "pop trade then disappear" bug.
+        # Every paper trade now locks its own BTC15 expiry at entry time; that
+        # locked timestamp is the only timer allowed to close it. This keeps the
+        # chart overlay, Paper Trading tab, and account state in sync.
+        t = self.account.open_trade
+        if self.latest_price is not None and t and t.expires_at and time.time() >= float(t.expires_at):
+            self.account.update(float(self.latest_price), force_close=True, force_reason="LOCKED_BTC15_END")
             self.capture_closed_trades_for_learning()
+            if str(self.chart.trade_plan.get("mode") or "") == "trade" and not self.account.open_trade:
+                self.chart.clear_plan(emit=False)
             self.update_stats()
 
     def _decision_signature(self, d) -> str:
