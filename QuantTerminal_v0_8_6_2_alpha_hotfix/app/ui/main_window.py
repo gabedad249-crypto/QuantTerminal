@@ -249,7 +249,7 @@ class MainWindow(QMainWindow):
         swing_btn = QPushButton("H/L")
         swing_btn.clicked.connect(self.toggle_swing_labels)
         chart_tools.addSpacing(12); chart_tools.addWidget(clean_btn); chart_tools.addWidget(gap_btn); chart_tools.addWidget(swing_btn)
-        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.6.1 locked trade hotfix • no stale Kalshi auto-close"))
+        chart_tools.addStretch(); chart_tools.addWidget(QLabel("v0.8.6.2 hard trade lock • no pop-close"))
         chart_panel.layout().addLayout(chart_tools)
         chart_panel.layout().addWidget(self.chart, 1)
         center.addWidget(chart_panel)
@@ -1018,11 +1018,11 @@ class MainWindow(QMainWindow):
         except Exception:
             ranges = []
         avg_range = sum(ranges) / len(ranges) if ranges else entry * 0.001
-        base = max(avg_range * 0.85, entry * 0.00045, 8.0)
+        base = max(avg_range * 1.25, entry * 0.00075, 18.0)
         if planned_stop and planned_stop > 1:
             base = max(base, abs(entry - float(planned_stop)) * 0.55)
         # Clamp so levels are visible and realistic for a 15m scout.
-        return max(entry * 0.00035, min(base, entry * 0.0035))
+        return max(entry * 0.00065, min(base, entry * 0.0045))
 
     def _configured_plan_values(self, d):
         """Apply user cash controls to a compact BTC15 chart plan.
@@ -1181,6 +1181,7 @@ class MainWindow(QMainWindow):
             f"Target: {t.target:,.2f}\n"
             f"{self._live_payout_line(t)}\n"
             f"MFE / MAE: ${getattr(t, 'mfe', 0.0):,.2f} / ${getattr(t, 'mae', 0.0):,.2f}\n"
+            f"Lifecycle: {' | '.join(getattr(t, 'manager_notes', [])[-3:])}\n"
             f"Kalshi odds: {self._kalshi_contract_summary(t.side)}\n"
             f"BTC15 expires: {snap.label()}\n\n"
             f"Distance to target: {dist_target:,.2f}\n"
@@ -1416,22 +1417,18 @@ class MainWindow(QMainWindow):
         return int(time.time()) - (int(time.time()) % 900)
 
     def _safe_trade_expiry_ts(self) -> float:
-        """Return a safe BTC15 expiry timestamp for paper trades.
+        """Return the locked expiry for the current BTC15 paper-trade bucket.
 
-        If the Kalshi snapshot is temporarily stale/old, fall back to the local
-        current 15-minute boundary. This prevents the paper account from opening
-        and instantly closing because an expired close_time was cached.
+        For trade management we intentionally use the current 15-minute bucket
+        boundary instead of a live Kalshi snapshot. The visible timer can still
+        show Kalshi, but the paper trade must never inherit a stale/old snapshot
+        and close immediately after opening.
         """
         now = time.time()
-        try:
-            snap = self.kalshi_timer.snapshot()
-            if snap.close_time:
-                exp = float(snap.close_time.timestamp())
-                if exp > now + 8:
-                    return exp
-        except Exception:
-            pass
-        return float(self._current_btc15_bucket() + 900)
+        local_exp = float(self._current_btc15_bucket() + 900)
+        if local_exp <= now + 10:
+            return float(self._current_btc15_bucket() + 1800)
+        return local_exp
 
     def _safe_seconds_left(self) -> int:
         return max(0, int(self._safe_trade_expiry_ts() - time.time()))
@@ -1537,7 +1534,7 @@ class MainWindow(QMainWindow):
             meta["cash_rr"] = cash_rr
             meta["btc15_bucket"] = bucket
             meta["expiry_ts"] = expiry_ts
-            meta["min_hold_seconds"] = 3.0
+            meta["min_hold_seconds"] = 20.0
 
             self.account.open_position(
                 side,
@@ -1554,9 +1551,9 @@ class MainWindow(QMainWindow):
                 self._used_gap_keys.add(self._planned_gap_key)
             self.chart.set_cash_metrics(self._cash_size(), self._cash_stop_loss(), self._cash_payout())
             self.chart.set_plan(side, entry, stop, target, active=True, mode="trade", emit=False)
-            exp = self.kalshi_timer.snapshot().label()
-            self.log_signal(f"OPENED PAPER {side} @ {entry:,.2f} | stop {stop:,.2f} | target {target:,.2f} | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} | expires BTC15 {exp}")
-            self.log_timeline(f"OPENED PAPER {side} | live entry {entry:,.2f} | lifecycle locked | min hold 3s | one trade for BTC15 bucket {bucket} | expires {exp}")
+            exp = time.strftime("%H:%M:%S", time.localtime(expiry_ts))
+            self.log_signal(f"OPENED PAPER {side} @ {entry:,.2f} | stop {stop:,.2f} | target {target:,.2f} | risk ${self._cash_stop_loss():.2f} payout ${self._cash_payout():.2f} | locked expiry {exp}")
+            self.log_timeline(f"OPENED PAPER {side} | live entry {entry:,.2f} | lifecycle locked | min hold 20s | one trade for BTC15 bucket {bucket} | locked expiry {exp}")
         except Exception as e:
             self.log(str(e))
 

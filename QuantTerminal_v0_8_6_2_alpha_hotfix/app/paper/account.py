@@ -153,6 +153,19 @@ class PaperAccount:
             return
         price = float(price)
         now = time.time()
+
+        # HARD LIFECYCLE GUARD:
+        # If a bad/stale BTC15 expiry ever gets written onto a trade, do not let
+        # it instantly close the trade right after opening. This was the source
+        # of the annoying "pop trade then no active trade" bug.
+        try:
+            if trade.expires_at and float(trade.expires_at) <= float(trade.opened_at) + 10.0:
+                trade.expires_at = float(trade.opened_at) + 900.0
+                trade.setup_meta["expiry_repaired"] = True
+        except Exception:
+            trade.expires_at = float(trade.opened_at) + 900.0
+            trade.setup_meta["expiry_repaired"] = True
+
         if trade.side == "LONG":
             raw_hit_stop = price <= trade.stop
             raw_hit_target = price >= trade.target
@@ -161,18 +174,31 @@ class PaperAccount:
             raw_hit_target = price <= trade.target
         time_expired = bool(trade.expires_at and now >= float(trade.expires_at))
 
-        # Anti-flicker lifecycle guard: a newly opened paper trade gets a short
-        # management lock so stale tick/rounding noise cannot open and close it
-        # on the same second. BTC15 expiry can still close immediately.
-        min_hold = float(trade.setup_meta.get("min_hold_seconds", 0.0) or 0.0)
-        tp_sl_live = (now - float(trade.opened_at)) >= max(0.0, min_hold)
+        # Do not allow TP/SL to close a brand-new trade immediately. The first
+        # few seconds after entry can include an old tick, a redrawn plan, or a
+        # tiny price jump. During this lock, P/L still updates live, but only the
+        # real BTC15 expiry is allowed to close it.
+        min_hold = float(trade.setup_meta.get("min_hold_seconds", 20.0) or 20.0)
+        age = now - float(trade.opened_at)
+        tp_sl_live = age >= max(0.0, min_hold)
         hit_stop = bool(raw_hit_stop and tp_sl_live)
         hit_target = bool(raw_hit_target and tp_sl_live)
+
+        # Extra force-close guard: timer code is allowed to close only if the
+        # locked expiry is truly reached. A force close before that is ignored.
+        if force_close and str(force_reason).upper().find("BTC15") >= 0:
+            force_close = bool(trade.expires_at and now >= float(trade.expires_at))
 
         unrealized = self._cash_scaled_pnl(trade, price)
         trade.pnl = unrealized
         trade.mfe = max(float(getattr(trade, "mfe", 0.0)), float(unrealized))
         trade.mae = min(float(getattr(trade, "mae", 0.0)), float(unrealized))
+        trade.manager_notes = [
+            f"age {age:.1f}s",
+            f"TP/SL armed: {'YES' if tp_sl_live else 'NO'}",
+            f"expires in {max(0.0, float(trade.expires_at or now) - now):.0f}s",
+        ]
+
         if force_close or time_expired or hit_stop or hit_target:
             trade.status = "CLOSED"
             trade.exit_price = price

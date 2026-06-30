@@ -447,8 +447,8 @@ class ChartWidget(QGraphicsView):
         line("stop", y_stop_raw, y_stop, stop, "#ef4444", "STOP", risk_cash)
 
         rr = float(self.trade_plan.get("rr") or 0)
-        title = "OPEN PAPER TRADE" if mode == "trade" else "PENDING PLAN — NOT OPEN"
-        subtitle = "compact R/R box" if mode == "trade" else "dashed lines only until paper opens"
+        title = "REAL OPEN PAPER TRADE" if mode == "trade" else "PENDING PLAN — NOT OPEN"
+        subtitle = "compact visual R/R box" if mode == "trade" else "dashed lines only until paper opens"
         self._text(self._plot.left() + 10, self._plot.top() + 10, f"{side} {title} • Ratio {rr:.2f}:1 • {subtitle}", "#d1d5db", 10)
 
 
